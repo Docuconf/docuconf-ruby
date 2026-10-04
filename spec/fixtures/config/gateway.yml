@@ -1,0 +1,11 @@
+# Baked into the image: anyway_config reads the section for the current
+# Rails environment. docuconf exports these as profile defaults.
+development:
+  debug: true
+  log_level: debug
+staging:
+  log_level: debug
+  sample_rate: 1.0
+production:
+  log_level: warn
+  request_timeout: PT10S
