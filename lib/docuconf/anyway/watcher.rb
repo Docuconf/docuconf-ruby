@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "weakref"
+
 module Docuconf
   module Anyway
     # Honours reload: :watch (SPEC §11.2 item 8). Kubernetes updates a
@@ -7,7 +9,8 @@ module Docuconf
     # directory, so the watcher polls a signature of each watched input's
     # directory (the symlink target plus the size and mtime of its files)
     # and, when it changes, re-reads and re-checks the input. A reload that
-    # fails its checks is logged and the previous value kept.
+    # fails its checks is logged and the previous value kept. The thread
+    # holds the config weakly and stops once the config is garbage collected.
     class Watcher
       DEFAULT_INTERVAL = 2.0
 
@@ -34,11 +37,19 @@ module Docuconf
       def start
         return self if interval <= 0
 
+        # The config references this watcher; the thread must not keep the
+        # config alive in return.
+        @config_ref = WeakRef.new(@config)
+        @config = nil
         @thread = Thread.new do
           Thread.current.name = "docuconf-watch"
           loop do
             sleep interval
+            break unless @config_ref.weakref_alive?
+
             poll
+          rescue WeakRef::RefError
+            break
           rescue StandardError => e
             Docuconf::Anyway.warn("file watcher error: #{e.class}: #{e.message}")
           end
@@ -68,19 +79,23 @@ module Docuconf
 
       private
 
+      def config
+        @config || @config_ref.__getobj__
+      end
+
       def reload(file)
-        validator = Validator.new(@config, env: @env)
-        password = validator.send(:keystore_password, @config.class.docuconf_declaration, file)
+        validator = Validator.new(config, env: @env)
+        password = validator.send(:keystore_password, config.class.docuconf_declaration, file)
         value, failures = Files.load(file, env: @env, password: password)
         unless failures.empty?
           failures.each do |f|
-            Docuconf::Anyway.warn("reload of #{file.name} rejected, keeping the previous value: [#{f.code}] #{f.message}")
+            Docuconf::Anyway.warn("reload of #{file.name} rejected, keeping the previous value: [#{f.code}] #{f.message}", once: false)
           end
           return false
         end
 
-        @config.docuconf_files[file.accessor] = value
-        Array(@config.docuconf_listeners[file.accessor]).each do |l|
+        config.docuconf_files[file.accessor] = value
+        Array(config.docuconf_listeners[file.accessor]).each do |l|
           l.call(value)
         rescue StandardError => e
           Docuconf::Anyway.warn("listener for #{file.name} failed: #{e.class}: #{e.message}")

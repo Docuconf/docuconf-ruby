@@ -258,6 +258,20 @@ RSpec.describe "file inputs at boot" do
       end
     end
 
+    it "starts a background watcher after a successful load" do
+      in_gateway("DOCUCONF_WATCH_INTERVAL" => "0.05") do |root|
+        Docuconf::Anyway.watch_files = true
+        c = Fixtures::GatewayConfig.new
+        expect(c.docuconf_watcher).to be_a(Docuconf::Anyway::Watcher)
+        write_file(root, "etc/gateway/routes/routes.yaml", "routes:\n  - match: /bg\n    upstream: https://bg\n")
+        deadline = Time.now + 5
+        sleep 0.05 until c.routes["routes"].first["match"] == "/bg" || Time.now > deadline
+        expect(c.routes["routes"].first["match"]).to eq "/bg"
+      ensure
+        c&.docuconf_watcher&.stop
+      end
+    end
+
     it "notices a Kubernetes-style ..data symlink swap" do
       Dir.mktmpdir do |root|
         dir = File.join(root, "etc/w")

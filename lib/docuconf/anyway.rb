@@ -92,11 +92,14 @@ module Docuconf
       def validate_all!(classes = nil)
         classes ||= configs.select { |k| k.name && (!k.config_attributes.empty? || !k.docuconf_file_decls.empty?) }
         violations = []
+        # These instances are thrown away: do not start file watchers for them.
+        Thread.current[:docuconf_no_watch] = true
         classes.each do |k|
           k.new
         rescue ValidationError => e
           violations.concat(e.violations)
         end
+        Thread.current[:docuconf_no_watch] = nil
         return true if violations.empty?
 
         error = ValidationError.new(violations)
@@ -104,9 +107,10 @@ module Docuconf
         raise error
       end
 
-      def warn(message)
+      # Prints a warning; by default each distinct message only once.
+      def warn(message, once: true)
         @warned ||= Set.new
-        return if @warned.include?(message)
+        return if once && @warned.include?(message)
 
         @warned << message
         Kernel.warn("docuconf: #{message}")
@@ -199,7 +203,7 @@ module Docuconf
           Docuconf::Anyway.write_termination_log(error.message)
           raise error
         end
-        Watcher.start(self) if Docuconf::Anyway.watch_files
+        Watcher.start(self) if Docuconf::Anyway.watch_files && !Thread.current[:docuconf_no_watch]
       end
     end
   end
