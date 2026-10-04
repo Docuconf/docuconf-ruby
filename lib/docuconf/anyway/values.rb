@@ -1,0 +1,189 @@
+# frozen_string_literal: true
+
+require "json"
+require "uri"
+
+module Docuconf
+  module Anyway
+    # Parsing and constraint checks shared by boot validation (values from
+    # the environment, YAML, credentials or defaults), declaration checks
+    # (defaults) and export (profile values).
+    #
+    # A "contract value" is the typed form the contract uses: Integer for
+    # int, Float or Integer for float, true/false, nanoseconds (Integer) for
+    # duration, Array for list, parsed JSON for json, String otherwise.
+    module Values
+      INT_RE = /\A-?(?:0|[1-9][0-9]*)\z/
+      FLOAT_RE = /\A[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\z/
+      URL_RE = /\A[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s]+\z/
+      INT64 = (-(2**63))..((2**63) - 1)
+      # anyway_config's :boolean caster treats these as true; everything else
+      # is false. docuconf accepts them plus their false counterparts and
+      # rejects anything else, rather than silently reading "flase" as false.
+      TRUE_RE = /\A(?:true|t|yes|y|1)\z/i
+      FALSE_RE = /\A(?:false|f|no|n|0)\z/i
+
+      Failure = Struct.new(:code, :message)
+
+      module_function
+
+      # Parses an environment string (SPEC §5). Returns [contract_value, nil]
+      # or [nil, Failure]. Values are never trimmed.
+      def parse_wire(var, raw)
+        case var.type
+        when "string", "enum" then [raw, nil]
+        when "url" then [raw, nil]
+        when "int" then parse_int(raw, var)
+        when "float" then parse_float(raw, var)
+        when "bool"
+          return [true, nil] if TRUE_RE.match?(raw)
+          return [false, nil] if FALSE_RE.match?(raw)
+
+          [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not a boolean (true or false)")]
+        when "duration"
+          ns = Duration.parse_iso8601(raw)
+          return [ns, nil] if ns
+
+          [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not an ISO 8601 duration such as PT30S")]
+        when "list"
+          # Split exactly as anyway_config's array coercion does.
+          items = raw.split(/\s*,\s*/)
+          if var.items == "int"
+            bad = items.find { |s| !INT_RE.match?(s) || !INT64.cover?(s.to_i) }
+            return [nil, Failure.new(:invalid_type, "list item #{var.secret ? "" : "#{bad.inspect} "}is not an integer")] if bad
+
+            items = items.map(&:to_i)
+          end
+          [items, nil]
+        when "json"
+          begin
+            [JSON.parse(raw, allow_nan: false), nil]
+          rescue JSON::ParserError
+            [nil, Failure.new(:invalid_type, "#{var.secret ? "the value" : "value"} is not valid JSON")]
+          end
+        else
+          [raw, nil]
+        end
+      end
+
+      def parse_int(raw, var = nil)
+        return [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not an integer")] unless INT_RE.match?(raw)
+
+        i = raw.to_i
+        return [nil, Failure.new(:invalid_type, "#{show(var, raw)} is outside the 64-bit integer range")] unless INT64.cover?(i)
+
+        [i, nil]
+      end
+
+      def parse_float(raw, var = nil)
+        return [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not a number")] unless FLOAT_RE.match?(raw)
+
+        f = Float(raw)
+        return [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not a finite number")] unless f.finite?
+
+        [f, nil]
+      end
+
+      # Converts a typed value (from YAML, credentials, a default or a
+      # programmatic override) to a contract value. Strings are parsed as
+      # if they came from the environment, since YAML often quotes values.
+      def from_typed(var, value)
+        return parse_wire(var, value) if value.is_a?(String) && !%w[string enum url duration].include?(var.type)
+
+        bad = -> { [nil, Failure.new(:invalid_type, "#{show(var, value)} is not a #{var.type}")] }
+        case var.type
+        when "string", "enum"
+          value.is_a?(String) || value.is_a?(Symbol) ? [value.to_s, nil] : bad.call
+        when "url"
+          value.is_a?(String) || value.is_a?(URI::Generic) ? [value.to_s, nil] : bad.call
+        when "int"
+          value.is_a?(Integer) && INT64.cover?(value) ? [value, nil] : bad.call
+        when "float"
+          value.is_a?(Numeric) && !(value.is_a?(Float) && !value.finite?) ? [value, nil] : bad.call
+        when "bool"
+          [true, false].include?(value) ? [value, nil] : bad.call
+        when "duration"
+          ns = Duration.to_ns(value)
+          ns.nil? || ns.negative? ? bad.call : [ns, nil]
+        when "list"
+          return bad.call unless value.is_a?(Array)
+
+          if var.items == "int"
+            value.all? { |x| x.is_a?(Integer) || (x.is_a?(String) && INT_RE.match?(x)) } ? [value.map { |x| Integer(x, 10) }, nil] : bad.call
+          else
+            value.all? { |x| x.is_a?(String) || x.is_a?(Symbol) || x.is_a?(Numeric) } ? [value.map(&:to_s), nil] : bad.call
+          end
+        when "json"
+          [Schema.deep_stringify(value), nil]
+        else
+          [value, nil]
+        end
+      end
+
+      # Checks a contract value against the variable's constraints. Returns
+      # a list of Failures.
+      def check(var, value)
+        out = []
+        c = var.constraints
+        case var.type
+        when "string"
+          len = value.length
+          if c[:min_length] && len < c[:min_length]
+            out << Failure.new(:out_of_range, "#{show(var, value)} is shorter than #{c[:min_length]} characters")
+          end
+          if c[:max_length] && len > c[:max_length]
+            out << Failure.new(:out_of_range, "#{show(var, value)} is longer than #{c[:max_length]} characters")
+          end
+          if var.regexp && !var.regexp.match?(value)
+            out << Failure.new(:pattern_mismatch, "#{show(var, value)} does not match pattern #{c[:pattern]}")
+          end
+        when "int", "float"
+          out << Failure.new(:out_of_range, "#{show(var, value)} is below min #{c[:min]}") if c[:min] && value < c[:min]
+          out << Failure.new(:out_of_range, "#{show(var, value)} is above max #{c[:max]}") if c[:max] && value > c[:max]
+        when "duration"
+          shown = var.secret ? "the value" : Duration.format_go(value)
+          if c[:min] && value < Duration.parse_go(c[:min])
+            out << Failure.new(:out_of_range, "#{shown} is below min #{c[:min]}")
+          end
+          if c[:max] && value > Duration.parse_go(c[:max])
+            out << Failure.new(:out_of_range, "#{shown} is above max #{c[:max]}")
+          end
+        when "url"
+          if !URL_RE.match?(value)
+            out << Failure.new(:invalid_type, "#{show(var, value)} is not a URL with a scheme://")
+          elsif c[:schemes] && !c[:schemes].include?(value[/\A[^:]+/])
+            scheme = var.secret ? "" : " #{value[/\A[^:]+/]}"
+            out << Failure.new(:invalid_scheme, "URL scheme#{scheme} is not one of #{c[:schemes].join(", ")}")
+          end
+        when "enum"
+          unless c[:values].include?(value)
+            out << Failure.new(:not_in_enum, "#{show(var, value)} is not one of #{c[:values].join(", ")}")
+          end
+        when "list"
+          if c[:min_items] && value.size < c[:min_items]
+            out << Failure.new(:too_few_items, "has #{value.size} item(s), needs at least #{c[:min_items]}")
+          end
+          if c[:max_items] && value.size > c[:max_items]
+            out << Failure.new(:too_many_items, "has #{value.size} item(s), allows at most #{c[:max_items]}")
+          end
+        when "json"
+          if c[:schema]
+            errs = Schema.validate(c[:schema], value)
+            unless errs.empty?
+              detail = var.secret ? "#{errs.size} schema error(s)" : errs.first(5).join("; ")
+              out << Failure.new(:schema_mismatch, "does not match its schema: #{detail}")
+            end
+          end
+        end
+        out
+      end
+
+      # How a value appears in a message: never for a secret.
+      def show(var, value)
+        return "the value" if var&.secret
+
+        value.inspect
+      end
+    end
+  end
+end
