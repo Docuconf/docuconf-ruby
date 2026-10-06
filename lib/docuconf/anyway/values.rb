@@ -127,7 +127,7 @@ module Docuconf
           return bad.call unless value.is_a?(Array)
 
           if var.items == "int"
-            value.all? { |x| x.is_a?(Integer) || (x.is_a?(String) && INT_RE.match?(x)) } ? [value.map { |x| Integer(x, 10) }, nil] : bad.call
+            value.all? { |x| x.is_a?(Integer) || (x.is_a?(String) && INT_RE.match?(x)) } ? [value.map { |x| x.is_a?(Integer) ? x : Integer(x, 10) }, nil] : bad.call
           else
             value.all? { |x| x.is_a?(String) || x.is_a?(Symbol) || x.is_a?(Numeric) } ? [value.map(&:to_s), nil] : bad.call
           end
