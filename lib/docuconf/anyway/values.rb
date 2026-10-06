@@ -32,8 +32,25 @@ module Docuconf
 
       module_function
 
-      # Parses an environment string (SPEC §5). Returns [contract_value, nil]
-      # or [nil, Failure]. Values are never trimmed.
+      # Reads one variable's environment value (SPEC §5): a String, or for
+      # an indexed list the Array of its NAME__0, NAME__1, ... values. Returns
+      # [contract_value, nil], [nil, Failure], or [UNSET, nil] when the
+      # variable counts as unset (absent, or empty for a non-string type).
+      def from_env(var, raw)
+        return [UNSET, nil] if raw.nil?
+        return [UNSET, nil] if raw.is_a?(Array) ? raw.empty? : (raw.empty? && var.type != "string")
+
+        failure = Array(raw).lazy.map { |r| unresolved_reference(var, r) }.find(&:itself)
+        return [nil, failure] if failure
+
+        parse_wire(var, raw)
+      end
+
+      UNSET = Object.new.freeze
+
+      # Parses an environment string (SPEC §5) in the variable's encoding.
+      # Returns [contract_value, nil] or [nil, Failure]. Values are never
+      # trimmed.
       def parse_wire(var, raw)
         case var.type
         when "string", "enum" then [raw, nil]
@@ -46,20 +63,11 @@ module Docuconf
 
           [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not a boolean (true or false)")]
         when "duration"
-          ns = Duration.parse_iso8601(raw)
+          ns = Duration.parse_wire(raw, var.encoding)
           return [ns, nil] if ns
 
-          [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not an ISO 8601 duration such as PT30S")]
-        when "list"
-          # Split exactly as anyway_config's array coercion does.
-          items = raw.split(/\s*,\s*/)
-          if var.items == "int"
-            bad = items.find { |s| !INT_RE.match?(s) || !INT64.cover?(s.to_i) }
-            return [nil, Failure.new(:invalid_type, "list item #{var.secret ? "" : "#{bad.inspect} "}is not an integer")] if bad
-
-            items = items.map(&:to_i)
-          end
-          [items, nil]
+          [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not #{Duration.describe_encoding(var.encoding)}")]
+        when "list" then parse_list(var, raw)
         when "json"
           begin
             [JSON.parse(raw, allow_nan: false), nil]
@@ -69,6 +77,51 @@ module Docuconf
         else
           [raw, nil]
         end
+      end
+
+      # A list in its encoding: csv (split on the separator, trimming
+      # spaces around it as anyway_config's array coercion does), json (an
+      # array), or indexed (raw is already the Array of item strings).
+      def parse_list(var, raw)
+        items =
+          case var.encoding
+          when "indexed" then Array(raw)
+          when "json"
+            begin
+              parsed = JSON.parse(raw, allow_nan: false)
+            rescue JSON::ParserError
+              return [nil, Failure.new(:invalid_type, "#{var.secret ? "the value" : "value"} is not a valid JSON array")]
+            end
+            return [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not a JSON array")] unless parsed.is_a?(Array)
+
+            return parse_json_items(var, parsed)
+          else
+            raw.split(/\s*#{Regexp.escape(var.separator)}\s*/)
+          end
+        return [items, nil] unless var.items == "int"
+
+        out = []
+        items.each_with_index do |s, i|
+          v, failure = parse_int(s, var)
+          return [nil, Failure.new(failure.code, "item #{i}: #{failure.message}")] if failure
+
+          out << v
+        end
+        [out, nil]
+      end
+
+      def parse_json_items(var, items)
+        items.each_with_index do |x, i|
+          ok = var.items == "int" ? x.is_a?(Integer) : x.is_a?(String)
+          unless ok
+            shown = var.secret ? "" : " #{JSON.generate(x)}"
+            return [nil, Failure.new(:invalid_type, "item #{i}#{shown} is not #{var.items == "int" ? "an integer" : "a string"}")]
+          end
+          if var.items == "int" && !INT64.cover?(x)
+            return [nil, Failure.new(:out_of_range, "item #{i}#{var.secret ? "" : " #{x}"} is outside the 64-bit integer range")]
+          end
+        end
+        [items, nil]
       end
 
       def parse_int(raw, var = nil)

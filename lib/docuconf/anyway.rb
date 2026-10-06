@@ -18,6 +18,7 @@ require_relative "anyway/watcher"
 require_relative "anyway/validator"
 require_relative "anyway/cue"
 require_relative "anyway/exporter"
+require_relative "anyway/contract"
 
 module Docuconf
   # docuconf for anyway_config: typed configuration contracts between a
@@ -217,17 +218,10 @@ module Docuconf
           raw = data[key]
           next unless raw.is_a?(String)
 
-          if (failure = Values.unresolved_reference(var, raw))
+          value, failure = Values.from_env(var, raw)
+          if value.equal?(Values::UNSET)
             data.delete(key)
-            @docuconf_env[var.attr] = {failure: failure}
-            next
-          end
-          if raw.empty? && var.type != "string"
-            data.delete(key)
-            next
-          end
-          value, failure = Values.parse_wire(var, raw)
-          if failure
+          elsif failure
             data.delete(key)
             @docuconf_env[var.attr] = {failure: failure}
           else

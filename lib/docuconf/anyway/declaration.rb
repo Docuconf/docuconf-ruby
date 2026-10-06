@@ -31,9 +31,15 @@ module Docuconf
         kw.each { |k, v| instance_variable_set(:"@#{k}", v) }
       end
 
-      def separator = ","
+      # The separator of a csv list.
+      def separator = @separator || ","
 
+      # The wire encoding (SPEC §5). A declared variable uses the encodings
+      # anyway_config parses: iso8601 durations and csv lists. A variable
+      # read from a contract (contract-first mode) uses the contract's.
       def encoding
+        return @encoding if @encoding
+
         case type
         when "duration" then "iso8601"
         when "list" then "csv"
@@ -403,23 +409,23 @@ module Docuconf
 
       # itemMin and itemMax bound each item of an int list (SPEC §4.3),
       # within the 64-bit range every int must fit.
-      def self.check_item_bounds(type, items, constraints, problems, label)
+      def self.check_item_bounds(type, items, constraints, problems, label, names: {item_min: "item_min", item_max: "item_max"})
         bounds = %i[item_min item_max].select { |k| constraints.key?(k) }
         return if bounds.empty?
 
         unless type == "list" && items == "int"
-          problems << "#{label}: item_min and item_max apply only to lists of int"
+          problems << "#{label}: #{names[:item_min]} and #{names[:item_max]} apply only to lists of int"
           bounds.each { |k| constraints.delete(k) }
           return
         end
         bounds.each do |k|
           next if constraints[k].is_a?(Integer) && Values::INT64.cover?(constraints[k])
 
-          problems << "#{label}: #{k} #{constraints[k].inspect} is not a 64-bit integer"
+          problems << "#{label}: #{names[k]} #{constraints[k].inspect} is not a 64-bit integer"
           constraints.delete(k)
         end
         lo, hi = constraints.values_at(:item_min, :item_max)
-        problems << "#{label}: item_min #{lo} is above item_max #{hi}" if lo && hi && lo > hi
+        problems << "#{label}: #{names[:item_min]} #{lo} is above #{names[:item_max]} #{hi}" if lo && hi && lo > hi
       end
 
       def self.normalize_deprecated(d)

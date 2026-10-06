@@ -63,6 +63,52 @@ module Docuconf
         ns
       end
 
+      SECONDS = /\A([0-9]+)(?:\.([0-9]{1,9}))?\z/
+      # .NET TimeSpan's invariant "c" format: [d.]hh:mm:ss[.fffffff].
+      TIMESPAN = /\A(?:([0-9]+)\.)?([0-9]{1,2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,7}))?\z/
+
+      # Parses a duration in a contract wire encoding (SPEC §5): go,
+      # iso8601, seconds or timespan. Returns nanoseconds or nil; a
+      # duration is never negative.
+      def parse_wire(input, encoding)
+        ns =
+          case encoding
+          when "go" then parse_go(input)
+          when "iso8601" then parse_iso8601(input)
+          when "seconds" then parse_seconds(input)
+          when "timespan" then parse_timespan(input)
+          end
+        ns&.negative? ? nil : ns
+      end
+
+      # A decimal number of seconds (90, 0.25). Returns nanoseconds or nil.
+      def parse_seconds(input)
+        m = SECONDS.match(input.to_s)
+        return nil unless m
+
+        (m[1].to_i * 1_000_000_000) + (m[2] ? m[2].ljust(9, "0").to_i : 0)
+      end
+
+      # A .NET TimeSpan ([d.]hh:mm:ss[.fff]). Returns nanoseconds or nil.
+      def parse_timespan(input)
+        m = TIMESPAN.match(input.to_s)
+        return nil unless m
+
+        d, h, mi, s, frac = m.captures
+        return nil if h.to_i > 23 || mi.to_i > 59 || s.to_i > 59
+
+        secs = (d.to_i * 86_400) + (h.to_i * 3600) + (mi.to_i * 60) + s.to_i
+        (secs * 1_000_000_000) + (frac ? frac.ljust(9, "0").to_i : 0)
+      end
+
+      # A wire encoding's name for messages.
+      def describe_encoding(encoding)
+        {
+          "go" => "a Go duration such as 1m30s", "iso8601" => "an ISO 8601 duration such as PT30S",
+          "seconds" => "a number of seconds such as 90", "timespan" => "a TimeSpan such as 00:01:30"
+        }.fetch(encoding, "a duration")
+      end
+
       # Canonical Go form, as the contract requires ("1h30m", "1s500ms", "0s").
       def format_go(ns)
         raise ArgumentError, "cannot express a negative duration in a contract" if ns.negative?
