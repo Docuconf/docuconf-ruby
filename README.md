@@ -364,4 +364,4 @@ Releases are published to RubyGems from CI with trusted publishing; see [RELEASI
 
 ## Licence
 
-The licence is pending and will be added before the first release.
+[MIT](LICENSE).
