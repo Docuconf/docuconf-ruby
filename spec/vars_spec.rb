@@ -162,6 +162,44 @@ RSpec.describe "variables at boot" do
     end
   end
 
+  describe "unresolved injector references" do
+    {
+      "vault:" => "vault:secret/data/gateway/db#url-hunter2",
+      "op://" => "op://prod/gateway/hunter2",
+      "ref+" => "ref+awssecrets://prod/gateway#hunter2"
+    }.each do |scheme, ref|
+      it "reports a secret still holding a #{scheme} reference, without printing it" do
+        in_gateway("GATEWAY_DATABASE_URL" => ref, "GATEWAY_KEYSTORE_PASSWORD" => ref) do |root|
+          expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
+            expect(codes(e)).to include(["GATEWAY_DATABASE_URL", :invalid_type], ["GATEWAY_KEYSTORE_PASSWORD", :invalid_type])
+            expect(e.message).to include(
+              "GATEWAY_DATABASE_URL [invalid_type]: holds an unresolved #{scheme} reference; " \
+              "the injector that should resolve it did not run"
+            )
+            expect(e.message).not_to include("hunter2")
+            log = File.read(File.join(root, "termination-log"))
+            expect(log).to include("unresolved #{scheme} reference")
+            expect(log).not_to include("hunter2")
+          }
+        end
+      end
+    end
+
+    it "leaves non-secret values that look like references to the usual checks" do
+      in_gateway("GATEWAY_REGION" => "vault:eu-west-1") do
+        expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
+          expect(codes(e)).to eq [["GATEWAY_REGION", :pattern_mismatch]]
+        }
+      end
+    end
+
+    it "accepts resolved values" do
+      in_gateway("GATEWAY_DATABASE_URL" => "postgres://app:pw@db/gw") do
+        expect(Fixtures::GatewayConfig.new.database_url).to eq "postgres://app:pw@db/gw"
+      end
+    end
+  end
+
   it "writes violations to the termination log" do
     in_gateway("GATEWAY_PORT" => "0") do |root|
       expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError)

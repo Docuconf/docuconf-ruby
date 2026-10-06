@@ -40,6 +40,13 @@ module Fixtures
     # Comes from Rails credentials, which the platform does not inject.
     exclude :secret_key_base
 
+    # The platform may supply non-secret settings in this file, nested by
+    # configKey (gateway: {port: 9090}).
+    config_overlay :platform,
+      path: "/etc/gateway/overlay/gateway.yml",
+      description: "Settings the platform supplies as a mounted file",
+      reload: :watch
+
     config_file :routes,
       format: :yaml,
       path: "/etc/gateway/routes/routes.yaml",

@@ -201,7 +201,8 @@ around commas in list items.
 
 ## YAML, credentials and precedence
 
-anyway_config reads `config/<name>.yml` and, in Rails, credentials, then the environment, which wins. This
+anyway_config reads `config/<name>.yml` and, in Rails, credentials, then any declared overlay (see below),
+then the environment, which wins. This
 matches the spec's precedence (platform variables override files). At export:
 
 - A YAML file without environment sections (or the `default_environmental_key` section) is always loaded:
@@ -212,6 +213,68 @@ matches the spec's precedence (platform variables override files). At export:
 - Values are checked against each variable's constraints, and a secret with a YAML value is an error.
 - Rails credentials are not injected by the platform, so attributes that come from them must be
   `exclude`d. Excluded attributes are still loaded by anyway_config, and `required` still applies to them.
+
+## Config-file overlays
+
+A platform can supply settings as a mounted YAML file instead of environment variables (SPEC §4.7). Declare
+where the app reads it:
+
+```ruby
+class BillingConfig < Anyway::Config
+  include Docuconf::Anyway
+
+  config_name :billing
+  attr_config port: 8080, log_level: "info"
+  describe :port, "HTTP listen port", min: 1, max: 65_535
+  describe :log_level, "Minimum log level", values: %w[debug info warn error]
+
+  config_overlay :platform,
+    path: "/etc/billing/overlay/billing.yml",
+    description: "Settings the platform supplies as a file",
+    reload: :watch # or :restart (the default)
+end
+```
+
+The export adds `overlays: platform: {format: "yaml", path: ..., keySeparator: ".", reload: "watch"}`.
+Every variable is exported with a `configKey` of `<config_name>.<attribute>` (`billing.port`), and the
+platform writes each value there, nested on `.` and in native YAML types, exactly as anyway_config reads
+`config/billing.yml`:
+
+```yaml
+billing:
+  log_level: warn
+  port: 9090
+```
+
+- **Precedence:** docuconf registers an anyway_config loader, `:docuconf_overlay`, in `Anyway.loaders` just
+  before `:env`: `config/<name>.yml` < Rails credentials < overlay < environment. Declaring an overlay opts in
+  to it, so it is loaded even when `configuration_sources` leaves it out.
+- **Optional:** a missing file is no values. A file that is not valid YAML is `file_malformed`, and its
+  values are checked like any other (`out_of_range`, `not_in_enum`, ...). Secrets in an overlay are ignored
+  with a warning: they come from the environment.
+- **`reload: :watch`:** the overlay's directory is polled like a watched file input. When it changes, the
+  config is loaded again through anyway_config into a new instance and validated; if that passes, its values
+  are copied into the running config and `config.on_overlay_change { |config| ... }` listeners run, otherwise
+  the problems are logged and the old values kept.
+- **Its own directory:** the platform mounts the overlay's directory, hiding what the image has there.
+  docuconf rejects reserved directories (`/app`, `/etc`, ...) and directories shared with a file input at
+  declaration, and at load an overlay in the app's root or in the directory anyway_config reads
+  `config/<name>.yml` from.
+
+## Injected secrets
+
+Platforms often supply secrets at start-up rather than in the pod spec: Bank-Vaults' `vault-env` resolves
+values such as `vault:secret/data/billing/db#url`, and wrappers such as `op run` resolve `op://` references,
+then start the app with the real values. Nothing changes in your declaration: anyway_config reads the
+environment as it is when the process starts, after injection, so injected values are validated like any
+other. docuconf never resolves references itself.
+
+If the injector did not run, the app sees the raw reference. A secret whose value still starts with `vault:`,
+`op://` or `ref+` is reported as `invalid_type`, naming the variable and the scheme but never the value:
+
+```
+BILLING_DATABASE_URL [invalid_type]: holds an unresolved vault: reference; the injector that should resolve it did not run
+```
 
 ## File inputs
 
@@ -262,7 +325,7 @@ checks is logged and the previous value kept. React with `config.on_file_change(
 `schema_mismatch`, `certificate_invalid`, `certificate_expiring`, `certificate_name_mismatch`, `key_mismatch`,
 `keystore_unreadable`.
 
-`ValidationError#violations` holds `Violation`s with `input`, `kind` (`:var` or `:file`), `code` and
+`ValidationError#violations` holds `Violation`s with `input`, `kind` (`:var`, `:file` or `:overlay`), `code` and
 `message`.
 
 ## Rails
@@ -279,10 +342,10 @@ Rake tasks: `docuconf:export` and `docuconf:check`.
 
 | Variable | Effect |
 |---|---|
-| `DOCUCONF_FILE_ROOT` | Prefix for absolute file paths (including paths from `path_env`), so `/etc/billing/tls` is read from `$DOCUCONF_FILE_ROOT/etc/billing/tls`. For local development and tests. |
+| `DOCUCONF_FILE_ROOT` | Prefix for absolute file and overlay paths (including paths from `path_env`), so `/etc/billing/tls` is read from `$DOCUCONF_FILE_ROOT/etc/billing/tls`. For local development and tests. |
 | `DOCUCONF_TERMINATION_LOG` | Where to write violations. By default they go to `/dev/termination-log` when it exists, so `kubectl describe pod` shows why the pod failed. |
 | `DOCUCONF_SKIP_VALIDATION` | `1` skips boot validation (file inputs are still loaded when they can be). |
-| `DOCUCONF_WATCH_INTERVAL` | Seconds between polls for `reload: :watch` inputs. |
+| `DOCUCONF_WATCH_INTERVAL` | Seconds between polls for `reload: :watch` inputs and overlays. |
 
 ## Development
 

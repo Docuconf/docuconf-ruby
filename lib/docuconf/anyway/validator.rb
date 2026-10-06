@@ -22,6 +22,11 @@ module Docuconf
         decl.vars.each do |var|
           add = ->(code, message) { violations << Violation.new(input: var.name, kind: :var, code: code, message: message) }
           info = from_env[var.attr]
+          # A value that came from an overlay but did not parse (the
+          # environment, when set, wins over it).
+          if !info && (f = @config.docuconf_overlay_value_failures[var.attr])
+            info = {failure: f}
+          end
           if info && info[:failure]
             add.call(info[:failure].code, info[:failure].message)
             next
@@ -41,6 +46,7 @@ module Docuconf
               next
             end
             value, failure = Values.from_typed(var, raw)
+            failure = Values.unresolved_reference(var, raw) || failure
             if failure
               add.call(failure.code, failure.message)
               next
@@ -58,6 +64,9 @@ module Docuconf
             message: "required, and not set (not part of the contract, e.g. a Rails credential)")
         end
 
+        @config.docuconf_overlay_failures.each do |overlay, f|
+          violations << Violation.new(input: overlay.name, kind: :overlay, code: f.code, message: f.message)
+        end
         violations.concat(load_files(decl))
         violations
       end
