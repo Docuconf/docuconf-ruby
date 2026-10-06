@@ -18,7 +18,7 @@ module Docuconf
     # Options accepted by `describe` and `constrain`.
     VAR_OPTIONS = %i[
       type group examples config_key deprecated secret
-      min max min_length max_length pattern values schemes items min_items max_items schema json_schema
+      min max min_length max_length pattern values schemes items min_items max_items item_min item_max schema json_schema
     ].freeze
 
     # One exported variable: an anyway_config attribute and its docuconf
@@ -76,6 +76,8 @@ module Docuconf
           h["separator"] = separator
           h["minItems"] = c[:min_items] if c[:min_items]
           h["maxItems"] = c[:max_items] if c[:max_items]
+          h["itemMin"] = c[:item_min] if c[:item_min]
+          h["itemMax"] = c[:item_max] if c[:item_max]
         when "json"
           h["schema"] = c[:schema] if c[:schema]
         end
@@ -218,9 +220,10 @@ module Docuconf
           end
 
           constraints = {}
-          %i[min max min_length max_length pattern schemes min_items max_items].each do |k|
+          %i[min max min_length max_length pattern schemes min_items max_items item_min item_max].each do |k|
             constraints[k] = m[k] unless m[k].nil?
           end
+          check_item_bounds(type, items, constraints, problems, env)
           constraints[:values] = m[:values].map(&:to_s) if m[:values]
           if type == "duration"
             %i[min max].each do |k|
@@ -396,6 +399,27 @@ module Docuconf
 
         Schema.problems(schema).each { |p| problems << "#{label}: schema #{p}" }
         schema
+      end
+
+      # itemMin and itemMax bound each item of an int list (SPEC §4.3),
+      # within the 64-bit range every int must fit.
+      def self.check_item_bounds(type, items, constraints, problems, label)
+        bounds = %i[item_min item_max].select { |k| constraints.key?(k) }
+        return if bounds.empty?
+
+        unless type == "list" && items == "int"
+          problems << "#{label}: item_min and item_max apply only to lists of int"
+          bounds.each { |k| constraints.delete(k) }
+          return
+        end
+        bounds.each do |k|
+          next if constraints[k].is_a?(Integer) && Values::INT64.cover?(constraints[k])
+
+          problems << "#{label}: #{k} #{constraints[k].inspect} is not a 64-bit integer"
+          constraints.delete(k)
+        end
+        lo, hi = constraints.values_at(:item_min, :item_max)
+        problems << "#{label}: item_min #{lo} is above item_max #{hi}" if lo && hi && lo > hi
       end
 
       def self.normalize_deprecated(d)

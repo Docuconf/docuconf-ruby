@@ -133,6 +133,20 @@ RSpec.describe "variables at boot" do
     end
   end
 
+  it "reports an int list item outside item_min/item_max as out_of_range" do
+    in_gateway("GATEWAY_WORKER_PORTS" => "7000,0") do
+      expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
+        expect(codes(e)).to eq [["GATEWAY_WORKER_PORTS", :out_of_range]]
+        expect(e.message).to include("GATEWAY_WORKER_PORTS [out_of_range]: item 1 (0) is below item_min 1")
+      }
+    end
+    in_gateway("GATEWAY_WORKER_PORTS" => "65536") do
+      expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
+        expect(codes(e)).to eq [["GATEWAY_WORKER_PORTS", :out_of_range]]
+      }
+    end
+  end
+
   it "never prints secret values" do
     secret = "mysql://app:hunter2-very-secret@db/x"
     in_gateway("GATEWAY_DATABASE_URL" => secret, "GATEWAY_KEYSTORE_PASSWORD" => "") do |root|

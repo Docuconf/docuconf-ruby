@@ -165,7 +165,10 @@ default the upcased `config_name`) + `_` + the upcased attribute, so `:port` in 
 - **Metadata**: `describe :attr, "description", group:, examples:, config_key:, deprecated:, type:`, plus any
   constraint. `constrain :attr, ...` adds constraints alone: `min`, `max` (numbers, or durations in Go or
   ISO 8601 syntax), `min_length`, `max_length`, `pattern`, `values`, `schemes`, `min_items`, `max_items`,
-  `schema`/`json_schema` (json only).
+  `item_min`/`item_max` (each item of an int list; exported as `itemMin`/`itemMax`, and an item outside them is
+  `out_of_range`), `schema`/`json_schema` (json only).
+- **Integer range**: Ruby's `Integer` holds any 64-bit value, so there is no narrower item or field type whose
+  range docuconf must export; values outside the 64-bit range are `out_of_range`.
 - **Secrets**: `secret :attr, ...`. A secret cannot have a default, examples, or a value in a YAML file, and
   its value never appears in errors.
 - **Required**: anyway_config's `required`. An attribute with a default (or a value in an always-loaded

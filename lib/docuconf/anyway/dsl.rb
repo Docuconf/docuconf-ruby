@@ -28,6 +28,7 @@ module Docuconf
       #   constrain :region, pattern: "^[a-z]{2}-[a-z]+-[0-9]$", min_length: 4
       #   constrain :log_level, values: %w[debug info warn error]
       #   constrain :origins, min_items: 1, max_items: 10
+      #   constrain :shards, item_min: 0, item_max: 1023   # each item of an int list
       #   constrain :callback_url, schemes: %w[https]
       #   constrain :rate_limits, schema: {per_minute: Integer, "burst?": Integer}
       def constrain(attr, **options)

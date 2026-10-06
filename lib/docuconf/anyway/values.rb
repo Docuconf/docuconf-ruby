@@ -184,6 +184,12 @@ module Docuconf
           if c[:max_items] && value.size > c[:max_items]
             out << Failure.new(:too_many_items, "has #{value.size} item(s), allows at most #{c[:max_items]}")
           end
+          if (lo = c[:item_min]) && (i = value.index { |x| x < lo })
+            out << Failure.new(:out_of_range, "item #{i}#{var.secret ? "" : " (#{value[i]})"} is below item_min #{lo}")
+          end
+          if (hi = c[:item_max]) && (i = value.index { |x| x > hi })
+            out << Failure.new(:out_of_range, "item #{i}#{var.secret ? "" : " (#{value[i]})"} is above item_max #{hi}")
+          end
         when "json"
           if c[:schema]
             errs = Schema.validate(c[:schema], value)
