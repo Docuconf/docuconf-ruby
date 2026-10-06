@@ -26,6 +26,7 @@ class ShopConfig < Anyway::Config
   attr_config :api_key, port: 8080
   describe :port, "HTTP listen port", min: 1, max: 9999
   exclude :api_key # a Rails credential
+  config_overlay :platform, path: "/etc/shop/overlay/shop.yml"
 end
 
 case mode
@@ -33,6 +34,7 @@ when "boot"
   begin
     Rails.application.initialize!
     puts "booted port=#{ShopConfig.new.port}"
+    puts "loaders=#{Anyway.loaders.keys.join(",")}"
   rescue Docuconf::Anyway::ValidationError => e
     puts e.message
     exit 1

@@ -217,6 +217,15 @@ contract.#Contract & {
 			pathEnv:     "SSL_CERT_FILE"
 		}
 	}
+	overlays: {
+		platform: {
+			format:       "yaml"
+			description:  "Settings the platform supplies as a mounted file"
+			path:         "/etc/gateway/overlay/gateway.yml"
+			keySeparator: "."
+			reload:       "watch"
+		}
+	}
 	profiles: {
 		selector: "RAILS_ENV"
 		default:  "development"

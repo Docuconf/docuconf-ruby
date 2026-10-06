@@ -59,6 +59,7 @@ module Docuconf
         vars = {}
         var_decls = {}
         files = {}
+        overlays = {}
         profile_defaults = Hash.new { |h, k| h[k] = {} }
 
         decls.each do |d|
@@ -116,9 +117,18 @@ module Docuconf
             end
             files[f.name] = [f, f.to_contract(password_env: password_env)]
           end
+
+          d.overlays.each do |o|
+            if overlays.key?(o.name) && overlays[o.name] != o
+              problems << "overlay #{o.name} is declared differently by #{d.klass.name}"
+              next
+            end
+            overlays[o.name] = o
+          end
         end
 
         check_files(files, var_decls, problems)
+        check_overlays(overlays, files, problems)
 
         unless profile_defaults.empty?
           unless vars.key?(@selector)
@@ -142,6 +152,7 @@ module Docuconf
           "vars" => vars.sort.to_h
         }
         out["files"] = files.sort.to_h { |n, (_, h)| [n, h] } unless files.empty?
+        out["overlays"] = overlays.sort.to_h { |n, o| [n, o.to_contract] } unless overlays.empty?
         unless profile_defaults.empty?
           out["profiles"] = {
             "selector" => @selector,
@@ -217,6 +228,18 @@ module Docuconf
       end
 
       def stringify(h) = h.to_h.transform_keys(&:to_s)
+
+      # Mount directories are unique across file inputs and overlays of
+      # every exported class (the per-class check is in Declaration).
+      def check_overlays(overlays, files, problems)
+        mounts = files.values.to_h { |f, _| [f.mount_dir, "file #{f.name}"] }
+        overlays.each_value do |o|
+          if mounts[o.mount_dir]
+            problems << "overlay #{o.name}: shares mount directory #{o.mount_dir} with #{mounts[o.mount_dir]}"
+          end
+          mounts[o.mount_dir] ||= "overlay #{o.name}"
+        end
+      end
 
       def check_files(files, vars, problems)
         mounts = {}

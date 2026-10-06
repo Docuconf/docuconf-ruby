@@ -13,6 +13,7 @@ require_relative "anyway/declaration"
 require_relative "anyway/dsl"
 require_relative "anyway/tls"
 require_relative "anyway/files"
+require_relative "anyway/overlays"
 require_relative "anyway/watcher"
 require_relative "anyway/validator"
 require_relative "anyway/cue"
@@ -127,6 +128,29 @@ module Docuconf
       # The watcher for reload: :watch inputs, if any.
       attr_reader :docuconf_watcher
 
+      # Problems reading config-file overlays in the last load, as
+      # [OverlayDecl, Failure] pairs.
+      def docuconf_overlay_failures
+        @docuconf_overlay_failures ||= []
+      end
+
+      # Overlay values that did not parse as their type in the last load, by
+      # attribute.
+      def docuconf_overlay_value_failures
+        @docuconf_overlay_value_failures ||= {}
+      end
+
+      # Calls the block with the config whenever a watched overlay changes
+      # and its new values pass validation.
+      def on_overlay_change(&block)
+        docuconf_overlay_listeners << block
+        self
+      end
+
+      def docuconf_overlay_listeners
+        @docuconf_overlay_listeners ||= []
+      end
+
       # Calls the block with the new value whenever a watched file input is
       # reloaded successfully.
       def on_file_change(accessor, &block)
@@ -148,11 +172,22 @@ module Docuconf
       # unset for non-string types (SPEC §5), and a value that fails strict
       # parsing is reported instead of being coerced into something else
       # ("12abc".to_i is 12).
+      #
+      # Declared overlays are loaded by the :docuconf_overlay loader, just
+      # before :env, whatever `configuration_sources` says: declaring an
+      # overlay opts in to it.
       def load_from_sources(base_config, **opts)
         decl = self.class.docuconf_declaration
         @docuconf_env = {}
         filter = self.class.configuration_sources
-        ::Anyway.loaders.each do |(id, loader)|
+        Overlays.check_location!(decl.overlays, opts[:config_path]) unless decl.overlays.empty?
+        docuconf_loaders(decl).each do |(id, loader)|
+          if id == OverlayLoader::ID
+            next if decl.overlays.empty?
+
+            ::Anyway::Utils.deep_merge!(base_config, loader.call(**opts, docuconf_config: self))
+            next
+          end
           next if filter && !filter.include?(id)
 
           data = loader.call(**opts)
@@ -164,6 +199,17 @@ module Docuconf
       end
 
       private
+
+      # anyway_config's loaders, with the overlay loader before :env even if
+      # it could not be registered.
+      def docuconf_loaders(decl)
+        list = []
+        ::Anyway.loaders.each { |entry| list << entry }
+        return list if decl.overlays.empty? || list.any? { |(id, _)| id == OverlayLoader::ID }
+
+        at = list.index { |(id, _)| id == :env } || list.size
+        list.insert(at, [OverlayLoader::ID, OverlayLoader])
+      end
 
       def docuconf_take_env(decl, data)
         decl.vars.each do |var|
@@ -205,7 +251,8 @@ module Docuconf
         violations = Validator.new(self).run
         unless violations.empty?
           error = ValidationError.new(violations)
-          Docuconf::Anyway.write_termination_log(error.message)
+          # A rejected overlay reload keeps the running config: not a crash.
+          Docuconf::Anyway.write_termination_log(error.message) unless Thread.current[:docuconf_reloading]
           raise error
         end
         Watcher.start(self) if Docuconf::Anyway.watch_files && !Thread.current[:docuconf_no_watch]
@@ -215,6 +262,8 @@ module Docuconf
 end
 
 require_relative "anyway/railtie" if defined?(::Rails::Railtie)
+
+Docuconf::Anyway::OverlayLoader.register
 
 # :duration reads ISO 8601 (the wire encoding docuconf declares for
 # durations; ActiveSupport::Duration.parse when ActiveSupport is loaded) and,

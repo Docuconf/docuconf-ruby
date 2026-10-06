@@ -41,6 +41,37 @@ module CueHelper
     end
   end
 
+  # Renders a contract with the meta-schema's #Render, as the platform
+  # does, and returns the text of the file `file_name` from the rendered
+  # ConfigMaps. `overlays` is CUE source for #Render's overlays input.
+  def cue_render_file(text, package:, overlays:, file_name:)
+    Dir.mktmpdir("docuconf-cue") do |dir|
+      FileUtils.cp_r(File.join(CueHelper.spec_dir, "cue.mod"), dir)
+      FileUtils.cp_r(File.join(CueHelper.spec_dir, "contract"), dir)
+      FileUtils.mkdir_p(File.join(dir, "out"))
+      FileUtils.mkdir_p(File.join(dir, "platform"))
+      File.write(File.join(dir, "out", "contract.cue"), text)
+      File.write(File.join(dir, "platform", "render.cue"), <<~CUE)
+        package platform
+
+        import (
+        	"docuconf.dev/contract"
+        	app "docuconf.dev/out:#{package}"
+        )
+
+        rendered: contract.#Render & {
+        	contract: app
+        	overlays: #{overlays}
+        }
+        file: [for c in rendered.configMaps if c.data[#{JSON.generate(file_name)}] != _|_ {c.data[#{JSON.generate(file_name)}]}][0]
+      CUE
+      out, status = Open3.capture2e(CueHelper.cue_bin, "export", "./platform", "-e", "file", "--out", "text", chdir: dir)
+      raise out unless status.success?
+
+      out
+    end
+  end
+
   # The contract as JSON data, via `cue export`.
   def cue_export(text)
     Dir.mktmpdir("docuconf-cue") do |dir|

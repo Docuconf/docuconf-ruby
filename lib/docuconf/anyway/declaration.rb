@@ -11,6 +11,7 @@ module Docuconf
     ].freeze
     FEATURE_FLAG_RE = /\A(?:FF|FEATURE|FEATURE_FLAG|ENABLE)_/
     VAR_TYPES = %w[string int float bool duration url enum list json].freeze
+    MAX_KEY_DEPTH = 8
     FILE_TYPES = %w[config tls caBundle keystore text binary].freeze
     KEY_ALGORITHMS = %w[RSA ECDSA Ed25519].freeze
 
@@ -137,12 +138,13 @@ module Docuconf
     # The declaration of one Anyway::Config class: its exported variables
     # and file inputs, after inference and definition-time checks.
     class Declaration
-      attr_reader :klass, :vars, :files, :nested, :warnings
+      attr_reader :klass, :vars, :files, :overlays, :nested, :warnings
 
-      def initialize(klass, vars, files, nested, warnings)
+      def initialize(klass, vars, files, nested, warnings, overlays = [])
         @klass = klass
         @vars = vars
         @files = files
+        @overlays = overlays
         @nested = nested
         @warnings = warnings
       end
@@ -289,10 +291,12 @@ module Docuconf
 
         files = klass.docuconf_file_decls.values
         check_files(klass, files, vars, problems)
+        overlays = klass.docuconf_overlay_decls.values
+        check_overlays(overlays, files, vars, problems)
 
         raise DeclarationError, problems unless problems.empty?
 
-        new(klass, vars, files, nested, warnings)
+        new(klass, vars, files, nested, warnings, overlays)
       end
 
       def self.env_name(klass, attr)
@@ -400,6 +404,43 @@ module Docuconf
         when String then {message: d}
         when Hash then {message: d[:message].to_s, replaced_by: d[:replaced_by]&.to_s}
         else {message: d.to_s}
+        end
+      end
+
+      def self.check_overlays(overlays, files, vars, problems)
+        return if overlays.empty?
+
+        mounts = files.to_h { |f| [f.mount_dir, "file #{f.name}"] }
+        overlays.each do |o|
+          label = "overlay #{o.name}"
+          problems << "#{label}: name must be a DNS label (#{INPUT_NAME_RE.source})" unless INPUT_NAME_RE.match?(o.name)
+          if o.description && o.description.strip.length < 5
+            problems << "#{label}: description must be at least 5 characters"
+          end
+          unless o.format == OverlayDecl::FORMAT
+            problems << "#{label}: format must be yaml; anyway_config layers YAML config files"
+          end
+          problems << "#{label}: reload must be restart or watch" unless %w[restart watch].include?(o.reload)
+          if !ABS_PATH_RE.match?(o.path) || o.path.split("/").any? { |s| s == "." || s == ".." } ||
+              o.path.include?("//") || o.path.end_with?("/")
+            problems << "#{label}: path #{o.path.inspect} must be absolute and normalised"
+            next
+          end
+          dir = o.mount_dir
+          problems << "#{label}: mount directory #{dir} is reserved; mounting there would hide the image's files" if RESERVED_DIRS.include?(dir)
+          if mounts[dir]
+            problems << "#{label}: shares mount directory #{dir} with #{mounts[dir]}; one mount would hide the other"
+          end
+          mounts[dir] ||= label
+        end
+        vars.each do |v|
+          next if v.secret
+
+          parts = v.config_key.split(OverlayDecl::KEY_SEPARATOR, -1)
+          if parts.any?(&:empty?) || parts.size > MAX_KEY_DEPTH
+            problems << "#{v.name}: configKey #{v.config_key.inspect} must be at most #{MAX_KEY_DEPTH} non-empty " \
+              "parts separated by \".\" to be set from an overlay"
+          end
         end
       end
 

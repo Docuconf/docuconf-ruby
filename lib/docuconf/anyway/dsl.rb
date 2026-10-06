@@ -86,6 +86,31 @@ module Docuconf
         docuconf_add_file(name, "binary", common)
       end
 
+      # A config-file overlay (SPEC §4.7): a YAML file the platform mounts,
+      # loaded after config/<name>.yml (and Rails credentials) and before
+      # the environment, so the environment still wins.
+      #
+      #   config_overlay :platform, path: "/etc/billing/overlay/billing.yml", reload: :watch
+      #
+      # The platform writes each value at its variable's configKey, split on
+      # "." (`billing.port` is `billing: {port: 8080}`), which is how
+      # anyway_config reads the class's own YAML. A missing file is fine.
+      # reload: :watch re-reads the file when it changes (see
+      # #on_overlay_change); :restart (the default) reads it at load only.
+      def config_overlay(name, path:, description: nil, reload: :restart, format: :yaml)
+        @docuconf_declaration = nil
+        decl = OverlayDecl.new(
+          name: name.to_s, path: path.to_s, reload: reload.to_s,
+          description: description&.to_s, format: format.to_s
+        )
+        docuconf_overlay_decls[decl.name] = decl
+        decl
+      end
+
+      def docuconf_overlay_decls
+        @docuconf_overlay_decls ||= superclass.respond_to?(:docuconf_overlay_decls) ? superclass.docuconf_overlay_decls.dup : {}
+      end
+
       # The checked declaration (variables and files) of this class.
       def docuconf_declaration
         @docuconf_declaration ||= Declaration.build(self).tap do |d|

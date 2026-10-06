@@ -6,11 +6,19 @@ RSpec.describe "Rails integration" do
   APP = File.expand_path("rails/app.rb", __dir__)
   LIB = File.expand_path("../lib", __dir__)
 
-  def run_app(mode, env = {})
+  # Extra string keyword arguments are environment variables.
+  def run_app(mode, env = {}, **opts)
+    overlay = opts.delete(:overlay)
+    env = env.merge(opts)
     Dir.mktmpdir do |root|
       FileUtils.mkdir_p(File.join(root, "config"))
       File.write(File.join(root, "config/shop.yml"), "production:\n  port: 443\ndevelopment:\n  port: 3000\n")
-      out, status = Open3.capture2e({"RAILS_ENV" => "production", "SHOP_PORT" => nil}.merge(env),
+      if overlay
+        FileUtils.mkdir_p(File.join(root, "etc/shop/overlay"))
+        File.write(File.join(root, "etc/shop/overlay/shop.yml"), overlay)
+      end
+      env = {"RAILS_ENV" => "production", "SHOP_PORT" => nil, "DOCUCONF_FILE_ROOT" => root}.merge(env)
+      out, status = Open3.capture2e(env,
         RbConfig.ruby, "-I", LIB, APP, mode, root)
       skip "railties is not installed (bundle with the rails group)" if status.exitstatus == 3
       [out, status]
@@ -27,6 +35,19 @@ RSpec.describe "Rails integration" do
     out, status = run_app("boot")
     expect(status).to be_success, out
     expect(out).to include("booted port=443")
+  end
+
+  it "layers the overlay after the YAML and credentials, before the environment" do
+    out, status = run_app("boot", overlay: "shop:\n  port: 8443\n")
+    expect(status).to be_success, out
+    expect(out).to include("booted port=8443")
+    loaders = out[/^loaders=(.*)$/, 1].split(",")
+    expect(loaders.last(2)).to eq %w[docuconf_overlay env]
+    expect(loaders.index("credentials")).to be < loaders.index("docuconf_overlay") if loaders.include?("credentials")
+
+    out, status = run_app("boot", {"SHOP_PORT" => "9000"}, overlay: "shop:\n  port: 8443\n")
+    expect(status).to be_success, out
+    expect(out).to include("booted port=9000")
   end
 
   it "exports the contract with rails docuconf:export, without a valid environment" do
