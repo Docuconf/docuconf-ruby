@@ -171,6 +171,11 @@ module Docuconf
           raw = data[key]
           next unless raw.is_a?(String)
 
+          if (failure = Values.unresolved_reference(var, raw))
+            data.delete(key)
+            @docuconf_env[var.attr] = {failure: failure}
+            next
+          end
           if raw.empty? && var.type != "string"
             data.delete(key)
             next

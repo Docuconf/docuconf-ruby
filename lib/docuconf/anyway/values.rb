@@ -25,6 +25,11 @@ module Docuconf
 
       Failure = Struct.new(:code, :message)
 
+      # Reference prefixes that injectors resolve before the app starts
+      # (SPEC §4.5.1): Bank-Vaults (vault:), 1Password (op://) and vals or
+      # similar wrappers (ref+).
+      INJECTOR_REF_RE = %r{\A(vault:|op://|ref\+)}
+
       module_function
 
       # Parses an environment string (SPEC §5). Returns [contract_value, nil]
@@ -82,6 +87,19 @@ module Docuconf
         return [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not a finite number")] unless f.finite?
 
         [f, nil]
+      end
+
+      # A secret still holding an injector reference means the injector did
+      # not run (SPEC §11.2). The message names the scheme, never the value.
+      # Returns a Failure or nil.
+      def unresolved_reference(var, raw)
+        return nil unless var.secret && raw.is_a?(String)
+
+        m = INJECTOR_REF_RE.match(raw)
+        return nil unless m
+
+        Failure.new(:invalid_type,
+          "holds an unresolved #{m[1]} reference; the injector that should resolve it did not run")
       end
 
       # Converts a typed value (from YAML, credentials, a default or a

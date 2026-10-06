@@ -41,6 +41,7 @@ module Docuconf
               next
             end
             value, failure = Values.from_typed(var, raw)
+            failure = Values.unresolved_reference(var, raw) || failure
             if failure
               add.call(failure.code, failure.message)
               next

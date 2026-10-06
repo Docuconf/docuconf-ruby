@@ -213,6 +213,21 @@ matches the spec's precedence (platform variables override files). At export:
 - Rails credentials are not injected by the platform, so attributes that come from them must be
   `exclude`d. Excluded attributes are still loaded by anyway_config, and `required` still applies to them.
 
+## Injected secrets
+
+Platforms often supply secrets at start-up rather than in the pod spec: Bank-Vaults' `vault-env` resolves
+values such as `vault:secret/data/billing/db#url`, and wrappers such as `op run` resolve `op://` references,
+then start the app with the real values. Nothing changes in your declaration: anyway_config reads the
+environment as it is when the process starts, after injection, so injected values are validated like any
+other. docuconf never resolves references itself.
+
+If the injector did not run, the app sees the raw reference. A secret whose value still starts with `vault:`,
+`op://` or `ref+` is reported as `invalid_type`, naming the variable and the scheme but never the value:
+
+```
+BILLING_DATABASE_URL [invalid_type]: holds an unresolved vault: reference; the injector that should resolve it did not run
+```
+
 ## File inputs
 
 | Macro | Contract type | Accessor returns |
