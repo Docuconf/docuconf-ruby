@@ -128,7 +128,7 @@ module Docuconf
         return [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not an integer")] unless INT_RE.match?(raw)
 
         i = raw.to_i
-        return [nil, Failure.new(:invalid_type, "#{show(var, raw)} is outside the 64-bit integer range")] unless INT64.cover?(i)
+        return [nil, Failure.new(:out_of_range, "#{show(var, raw)} is outside the 64-bit integer range")] unless INT64.cover?(i)
 
         [i, nil]
       end
@@ -168,7 +168,10 @@ module Docuconf
         when "url"
           value.is_a?(String) || value.is_a?(URI::Generic) ? [value.to_s, nil] : bad.call
         when "int"
-          value.is_a?(Integer) && INT64.cover?(value) ? [value, nil] : bad.call
+          return bad.call unless value.is_a?(Integer)
+          return [nil, Failure.new(:out_of_range, "#{show(var, value)} is outside the 64-bit integer range")] unless INT64.cover?(value)
+
+          [value, nil]
         when "float"
           value.is_a?(Numeric) && !(value.is_a?(Float) && !value.finite?) ? [value, nil] : bad.call
         when "bool"
@@ -180,7 +183,14 @@ module Docuconf
           return bad.call unless value.is_a?(Array)
 
           if var.items == "int"
-            value.all? { |x| x.is_a?(Integer) || (x.is_a?(String) && INT_RE.match?(x)) } ? [value.map { |x| x.is_a?(Integer) ? x : Integer(x, 10) }, nil] : bad.call
+            return bad.call unless value.all? { |x| x.is_a?(Integer) || (x.is_a?(String) && INT_RE.match?(x)) }
+
+            ints = value.map { |x| x.is_a?(Integer) ? x : Integer(x, 10) }
+            if (i = ints.index { |x| !INT64.cover?(x) })
+              return [nil, Failure.new(:out_of_range, "item #{i}#{var.secret ? "" : " (#{ints[i]})"} is outside the 64-bit integer range")]
+            end
+
+            [ints, nil]
           else
             value.all? { |x| x.is_a?(String) || x.is_a?(Symbol) || x.is_a?(Numeric) } ? [value.map(&:to_s), nil] : bad.call
           end
