@@ -165,7 +165,10 @@ default the upcased `config_name`) + `_` + the upcased attribute, so `:port` in 
 - **Metadata**: `describe :attr, "description", group:, examples:, config_key:, deprecated:, type:`, plus any
   constraint. `constrain :attr, ...` adds constraints alone: `min`, `max` (numbers, or durations in Go or
   ISO 8601 syntax), `min_length`, `max_length`, `pattern`, `values`, `schemes`, `min_items`, `max_items`,
-  `schema`/`json_schema` (json only).
+  `item_min`/`item_max` (each item of an int list; exported as `itemMin`/`itemMax`, and an item outside them is
+  `out_of_range`), `schema`/`json_schema` (json only).
+- **Integer range**: Ruby's `Integer` holds any 64-bit value, so there is no narrower item or field type whose
+  range docuconf must export; values outside the 64-bit range are `out_of_range`.
 - **Secrets**: `secret :attr, ...`. A secret cannot have a default, examples, or a value in a YAML file, and
   its value never appears in errors.
 - **Required**: anyway_config's `required`. An attribute with a default (or a value in an always-loaded
@@ -318,6 +321,25 @@ Checks at boot (SPEC §11.2 item 7):
 (Kubernetes swaps a `..data` symlink) every 2 seconds (`DOCUCONF_WATCH_INTERVAL`). A reload that fails its
 checks is logged and the previous value kept. React with `config.on_file_change(:serving_tls) { |tls| ... }`.
 
+## Contract-first mode
+
+`Docuconf::Anyway::Contract` validates an environment against a contract with no `Anyway::Config` class, for
+teams that write the contract in CUE by hand and export it with `cue export --out json`:
+
+```ruby
+contract = Docuconf::Anyway::Contract.parse(File.read("contract.json")) # JSON text or a Hash
+values = contract.load(ENV) # => {"PORT" => 8080, "TIMEOUT" => 30.seconds, "ORIGINS" => [...], "DEBUG" => nil}
+```
+
+`Docuconf::Anyway.load_contract(json, env: ENV)` does both steps. It reads every wire encoding of SPEC §5: `csv`
+lists with any `separator`, `json` lists and `indexed` lists (`NAME__0`, `NAME__1`, ...); `go`, `iso8601`,
+`seconds` and `timespan` (`[d.]hh:mm:ss[.fff]`) durations. Values go through the same parsing and checks as the
+declaration path, profile defaults apply for the selected profile, and every problem is raised together as a
+`ValidationError` (also written to the termination log; pass `termination_log: false` to skip that). A
+malformed contract raises `DeclarationError`. Values are keyed by variable name: absent optional variables are
+`nil`, and durations are `ActiveSupport::Duration` (seconds without ActiveSupport). File inputs and overlays in
+the contract are not checked in this mode.
+
 ## Error codes
 
 `missing_required`, `invalid_type`, `out_of_range`, `pattern_mismatch`, `not_in_enum`, `invalid_scheme`,
@@ -360,8 +382,23 @@ The export spec runs `cue vet -c` on the golden contract against the meta-schema
 `DOCUCONF_SPEC_CUE`), using `cue` from `$CUE`, `~/go/bin/cue` or `PATH`. It is skipped when either is missing,
 unless `DOCUCONF_REQUIRE_VET=1`. Regenerate the golden file with `UPDATE_GOLDEN=1 bundle exec rspec`.
 
+### Conformance
+
+`spec/conformance_spec.rb` runs the shared conformance suite (SPEC §12): every case in docuconf-go's
+`conformance/cases.json`, through contract-first mode, one example per case named by its `id`. It reads the file
+from `DOCUCONF_CONFORMANCE`, falling back to `../docuconf-go/conformance/cases.json`, and skips when the file is
+missing, unless `DOCUCONF_REQUIRE_CONFORMANCE=1` (as in CI):
+
+```sh
+DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONFORMANCE=1 \
+  bundle exec rspec spec/conformance_spec.rb
+```
+
+No capability tags are skipped: Ruby's `Integer` holds every 64-bit value (`int64`), and `json` values are
+validated against their JSON Schema (`json-schema`).
+
 Releases are published to RubyGems from CI with trusted publishing; see [RELEASING.md](RELEASING.md).
 
 ## Licence
 
-The licence is pending and will be added before the first release.
+[MIT](LICENSE).

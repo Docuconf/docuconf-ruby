@@ -14,7 +14,7 @@ Gem::Specification.new do |spec|
     Kubernetes platform validates before deploying.
   TXT
   spec.homepage = "https://github.com/docuconf/docuconf-ruby"
-  # Licence pending: see README.
+  spec.license = "MIT"
   spec.required_ruby_version = ">= 3.2"
 
   spec.metadata = {
@@ -25,7 +25,7 @@ Gem::Specification.new do |spec|
     "rubygems_mfa_required" => "true"
   }
 
-  spec.files = Dir["lib/**/*.{rb,rake}", "exe/*", "README.md"]
+  spec.files = Dir["lib/**/*.{rb,rake}", "exe/*", "README.md", "LICENSE"]
   spec.bindir = "exe"
   spec.executables = ["docuconf"]
   spec.require_paths = ["lib"]

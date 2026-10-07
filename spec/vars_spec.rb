@@ -41,12 +41,45 @@ RSpec.describe "variables at boot" do
     end
   end
 
-  it "rejects leading zeros, signs, spaces and values outside int64" do
-    ["+5", "007", " 5", "5 ", "1e3", "9223372036854775808"].each do |raw|
+  it "rejects leading zeros, signs and spaces" do
+    ["+5", "007", " 5", "5 ", "1e3"].each do |raw|
       in_gateway("GATEWAY_PORT" => raw) do
         expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
           expect(codes(e)).to eq [["GATEWAY_PORT", :invalid_type]]
         }
+      end
+    end
+  end
+
+  it "reports integers outside the 64-bit range as out_of_range" do
+    in_gateway("GATEWAY_GOMEMLIMIT" => "9223372036854775808", "GATEWAY_WORKER_PORTS" => "1,99999999999999999999") do
+      expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
+        expect(codes(e)).to contain_exactly(["GATEWAY_GOMEMLIMIT", :out_of_range], ["GATEWAY_WORKER_PORTS", :out_of_range])
+      }
+    end
+  end
+
+  it "reports a bad duration in config/<name>.yml as invalid_type, with the other problems" do
+    klass = Class.new(Anyway::Config) do
+      include Docuconf::Anyway
+      config_name :yml
+      attr_config timeout: "PT5S", payload: nil, port: 80
+      coerce_types timeout: :duration, payload: :json
+      describe :timeout, "Request timeout"
+      describe :payload, "Extra payload"
+      describe :port, "Listen port", min: 1
+    end
+    Dir.mktmpdir do |dir|
+      path = write_file(dir, "config/yml.yml", "timeout: forever\npayload: \"{oops\"\nport: 0\n")
+      with_env("YML_CONF" => path, "DOCUCONF_TERMINATION_LOG" => File.join(dir, "log")) do
+        expect { klass.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
+          expect(codes(e)).to contain_exactly(["YML_TIMEOUT", :invalid_type], ["YML_PAYLOAD", :invalid_type], ["YML_PORT", :out_of_range])
+          expect(e.message).to include('YML_TIMEOUT [invalid_type]: "forever" is not a duration')
+        }
+      end
+      File.write(path, "timeout: PT1M\n")
+      with_env("YML_CONF" => path) do
+        expect(Docuconf::Anyway::Duration.to_ns(klass.new.timeout)).to eq 60_000_000_000
       end
     end
   end
@@ -129,6 +162,20 @@ RSpec.describe "variables at boot" do
     with_env("LISTS_HOSTS" => "a.internal") do
       expect { klass.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
         expect(codes(e)).to eq [["LISTS_HOSTS", :too_few_items]]
+      }
+    end
+  end
+
+  it "reports an int list item outside item_min/item_max as out_of_range" do
+    in_gateway("GATEWAY_WORKER_PORTS" => "7000,0") do
+      expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
+        expect(codes(e)).to eq [["GATEWAY_WORKER_PORTS", :out_of_range]]
+        expect(e.message).to include("GATEWAY_WORKER_PORTS [out_of_range]: item 1 (0) is below item_min 1")
+      }
+    end
+    in_gateway("GATEWAY_WORKER_PORTS" => "65536") do
+      expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
+        expect(codes(e)).to eq [["GATEWAY_WORKER_PORTS", :out_of_range]]
       }
     end
   end

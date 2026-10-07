@@ -130,6 +130,8 @@ contract.#Contract & {
 			items:       "int"
 			encoding:    "csv"
 			separator:   ","
+			itemMin:     1
+			itemMax:     65535
 		}
 		RAILS_ENV: {
 			type:        "string"

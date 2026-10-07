@@ -29,7 +29,7 @@ module Fixtures
     describe :request_timeout, "Upstream request timeout", min: "1s", max: "5m"
     describe :log_level, "Minimum log level emitted", values: %w[debug info warn error], group: "logging"
     describe :allowed_origins, "CORS origins allowed to call the API", min_items: 1, max_items: 10
-    describe :worker_ports, "Ports the workers bind"
+    describe :worker_ports, "Ports the workers bind", item_min: 1, item_max: 65_535
     describe :rate_limits, "Default per-client rate limits",
       schema: {perMinute: S.integer(min: 1), "burst?": S.integer(min: 0)}
     describe :region, "Cloud region the service runs in", examples: ["eu-west-1"]

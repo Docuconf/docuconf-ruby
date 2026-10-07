@@ -39,6 +39,24 @@ RSpec.describe "declaration checks" do
       .to eq ["DECL_T: default 10m is above max 5m"]
   end
 
+  it "allows item bounds only on int lists, within 64 bits, in order" do
+    expect(problems {
+      attr_config tags: [], shards: [], big: [], order: []
+      coerce_types tags: {type: :string, array: true}, shards: {type: :integer, array: true},
+        big: {type: :integer, array: true}, order: {type: :integer, array: true}
+      describe :tags, "Tags to apply", item_max: 3
+      describe :shards, "Shards owned", item_min: 0, item_max: 1023
+      describe :big, "Too big bounds", item_max: 2**63
+      describe :order, "Bounds reversed", item_min: 5, item_max: 1
+    }).to contain_exactly(
+      "DECL_TAGS: item_min and item_max apply only to lists of int",
+      "DECL_BIG: item_max 9223372036854775808 is not a 64-bit integer",
+      "DECL_ORDER: item_min 5 is above item_max 1"
+    )
+    expect(problems { attr_config shards: [0, 2000]; describe :shards, "Shards owned", item_max: 1023 })
+      .to eq ["DECL_SHARDS: default item 1 (2000) is above item_max 1023"]
+  end
+
   it "rejects secrets with defaults or examples" do
     expect(problems { attr_config token: "abc"; describe :token, "API token"; secret :token })
       .to eq ["DECL_TOKEN: a secret must not have a default (it would ship in the image)"]

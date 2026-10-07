@@ -15,7 +15,6 @@ OIDC token, so no RubyGems API key is stored anywhere.
    - environment: `release`
 2. In the GitHub repository, create an environment named `release`. Restrict it to tags matching `v*` and
    add required reviewers if releases should be approved.
-3. Add a licence before the first release (see README).
 
 ## Each release
 
