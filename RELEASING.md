@@ -18,20 +18,21 @@ OIDC token, so no RubyGems API key is stored anywhere.
 
 ## Each release
 
-1. Update `Docuconf::Anyway::VERSION` in `lib/docuconf/anyway/version.rb` (semver; the API is
-   pre-1.0, so breaking changes bump the minor version).
-2. Regenerate the golden contract if the generator version appears in it:
-   `UPDATE_GOLDEN=1 bundle exec rspec spec/export_spec.rb`, and review the diff.
-3. Commit, then tag and push:
+Releases are automated with [release-please](https://github.com/googleapis/release-please); see
+[CONTRIBUTING.md](CONTRIBUTING.md#how-releases-happen) for the commit conventions it reads.
 
-   ```sh
-   git tag v0.1.0
-   git push origin main v0.1.0
-   ```
+1. Merge the open release PR (`chore(main): release X.Y.Z`). It already bumps `Docuconf::Anyway::VERSION` in
+   `lib/docuconf/anyway/version.rb` (semver; the API is pre-1.0, so breaking changes bump the minor version) and
+   updates `CHANGELOG.md`. The golden contract and the example contract do not need regenerating: their
+   comparisons ignore `metadata.generator.version`.
+2. release-please tags the merge commit `vX.Y.Z` and creates the GitHub release, with the changelog entries as its
+   notes.
+3. `.github/workflows/release.yml` runs on the tag: it checks that the tag matches `VERSION`, runs the specs,
+   builds the gem and pushes it with [`rubygems/release-gem`](https://github.com/rubygems/release-gem).
 
-4. The workflow checks that the tag matches `VERSION`, runs the specs, builds the gem and pushes it with
-   [`rubygems/release-gem`](https://github.com/rubygems/release-gem).
-5. Write release notes on the GitHub release for the tag.
+If the release PR was created with `GITHUB_TOKEN` (no release GitHub App configured), the tag does not trigger
+`release.yml` by itself, so `.github/workflows/release-please.yml` starts it with `gh workflow run`. To redo a
+release by hand: `gh workflow run release.yml --ref vX.Y.Z`.
 
 To check the package locally without publishing: `gem build docuconf-anyway.gemspec` and inspect the
 file list with `gem spec docuconf-anyway-*.gem files`.
