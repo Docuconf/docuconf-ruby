@@ -92,6 +92,8 @@ jobs:
 
       - name: Pick the docuconf-go ref
         id: dcref
+        # This job's run steps default to examples/orders.
+        working-directory: ${{ github.workspace }}
         env:
           EVENT: ${{ github.event_name }}
           INPUT_REF: ${{ inputs.docuconf_go_ref }}
