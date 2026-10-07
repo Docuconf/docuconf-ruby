@@ -59,7 +59,12 @@ module Docuconf
       end
 
       def load_files(o, files)
-        (Array(o[:require]) + files).each { |f| require File.expand_path(f) }
+        (Array(o[:require]) + files).each do |f|
+          path = File.expand_path(f)
+          raise OptionParser::InvalidArgument, "#{f}: no such file" unless File.file?(path) || File.file?("#{path}.rb")
+
+          require path
+        end
         return nil unless o[:classes]
 
         o[:classes].map do |n|

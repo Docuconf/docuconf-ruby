@@ -226,6 +226,14 @@ RSpec.describe "contract export" do
       end
     end
 
+    it "names a missing file instead of printing a backtrace" do
+      err = StringIO.new
+      expect(Docuconf::Anyway::CLI.start(["export", "-n", "x", "config/nope.rb"], out: StringIO.new, err: err)).to eq 2
+      expect(err.string).to eq "docuconf: invalid argument: config/nope.rb: no such file\n"
+    ensure
+      Docuconf::Anyway.export_mode = false
+    end
+
     it "fails without --name" do
       err = StringIO.new
       expect(Docuconf::Anyway::CLI.start(["export"], out: StringIO.new, err: err)).to eq 2
