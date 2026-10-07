@@ -80,10 +80,14 @@ module Docuconf
         when "list" then parse_list(var, raw)
         when "json"
           begin
-            [JSON.parse(raw, allow_nan: false), nil]
+            parsed = JSON.parse(raw, allow_nan: false)
           rescue JSON::ParserError
-            [nil, Failure.new(:invalid_type, "#{var.secret ? "the value" : "value"} is not valid JSON")]
+            return [nil, Failure.new(:invalid_type, "#{var.secret ? "the value" : "value"} is not valid JSON")]
           end
+          # maxLength bounds the value as received, whitespace included,
+          # not as it would be re-encoded (SPEC §4.3).
+          failure = json_max_length(var, raw)
+          failure ? [nil, failure] : [parsed, nil]
         else
           [raw, nil]
         end
@@ -205,10 +209,40 @@ module Docuconf
             value.all? { |x| x.is_a?(String) || x.is_a?(Symbol) || x.is_a?(Numeric) } ? [value.map(&:to_s), nil] : bad.call
           end
         when "json"
-          [Schema.deep_stringify(value), nil]
+          value = Schema.deep_stringify(value)
+          # A structured value (from YAML, an overlay or a default) has no
+          # wire string; its compact JSON is what the platform would send.
+          return [value, nil] unless var.constraints[:max_length]
+
+          begin
+            wire = JSON.generate(value)
+          rescue JSON::GeneratorError
+            return bad.call
+          end
+          failure = json_max_length(var, wire)
+          failure ? [nil, failure] : [value, nil]
         else
           [value, nil]
         end
+      end
+
+      # The length of a value in characters: Unicode code points, never
+      # bytes (SPEC §4.3). A binary or US-ASCII string, as the environment
+      # is under a C or POSIX locale, is read as UTF-8.
+      def char_length(s)
+        s = s.dup.force_encoding(Encoding::UTF_8) if s.encoding == Encoding::BINARY || s.encoding == Encoding::US_ASCII
+        s.length
+      end
+
+      # A json value's wire string against maxLength. Returns a Failure or nil.
+      def json_max_length(var, wire)
+        max = var.constraints[:max_length]
+        return nil unless max
+
+        n = char_length(wire)
+        return nil if n <= max
+
+        Failure.new(:out_of_range, "is #{n} characters of JSON, above maxLength #{max}")
       end
 
       # Checks a contract value against the variable's constraints. Returns
@@ -218,7 +252,7 @@ module Docuconf
         c = var.constraints
         case var.type
         when "string"
-          len = value.length
+          len = char_length(value)
           if c[:min_length] && len < c[:min_length]
             out << Failure.new(:out_of_range, "#{show(var, value)} is shorter than #{c[:min_length]} characters")
           end
@@ -245,6 +279,8 @@ module Docuconf
           elsif c[:schemes] && !c[:schemes].include?(value[/\A[^:]+/])
             scheme = var.secret ? "" : " #{value[/\A[^:]+/]}"
             out << Failure.new(:invalid_scheme, "URL scheme#{scheme} is not one of #{c[:schemes].join(", ")}")
+          elsif c[:max_length] && (n = char_length(value)) > c[:max_length]
+            out << Failure.new(:out_of_range, "#{show(var, value)} is #{n} characters, above maxLength #{c[:max_length]}")
           end
         when "enum"
           unless c[:values].include?(value)
@@ -262,6 +298,17 @@ module Docuconf
           end
           if (hi = c[:item_max]) && (i = value.index { |x| x > hi })
             out << Failure.new(:out_of_range, "item #{i}#{var.secret ? "" : " (#{value[i]})"} is above item_max #{hi}")
+          end
+          if var.items == "string"
+            # Each item after splitting, so a separator is never counted.
+            if (lo = c[:item_min_length]) && (i = value.index { |x| char_length(x) < lo })
+              out << Failure.new(:out_of_range,
+                "item #{i}#{var.secret ? "" : " (#{value[i].inspect})"} is #{char_length(value[i])} characters, below item_min_length #{lo}")
+            end
+            if (hi = c[:item_max_length]) && (i = value.index { |x| char_length(x) > hi })
+              out << Failure.new(:out_of_range,
+                "item #{i}#{var.secret ? "" : " (#{value[i].inspect})"} is #{char_length(value[i])} characters, above item_max_length #{hi}")
+            end
           end
         when "json"
           if c[:schema]

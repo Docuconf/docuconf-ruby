@@ -202,7 +202,8 @@ module Docuconf
       CONSTRAINTS = {
         "min" => :min, "max" => :max, "minLength" => :min_length, "maxLength" => :max_length,
         "pattern" => :pattern, "values" => :values, "schemes" => :schemes, "minItems" => :min_items,
-        "maxItems" => :max_items, "itemMin" => :item_min, "itemMax" => :item_max, "schema" => :schema
+        "maxItems" => :max_items, "itemMin" => :item_min, "itemMax" => :item_max,
+        "itemMinLength" => :item_min_length, "itemMaxLength" => :item_max_length, "schema" => :schema
       }.freeze
       private_constant :CONSTRAINTS
 
@@ -245,6 +246,13 @@ module Docuconf
         when "enum"
           problems << "#{label}: enum needs a non-empty values list" if Array(constraints[:values]).empty?
         end
+        # The meta-schema allows minLength only on a string, maxLength on a
+        # string, url or json, and item lengths only on a string list.
+        constraints.delete(:min_length) unless type == "string"
+        constraints.delete(:max_length) unless %w[string url json].include?(type)
+        Declaration.check_lengths(type, items, constraints, problems, label,
+          names: {min_length: "minLength", max_length: "maxLength",
+                  item_min_length: "itemMinLength", item_max_length: "itemMaxLength"})
         regexp = nil
         if constraints[:pattern]
           begin
