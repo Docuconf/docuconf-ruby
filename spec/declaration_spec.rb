@@ -122,4 +122,77 @@ RSpec.describe "declaration checks" do
       config { config_file :x, format: :json, path: "/srv/x/x.json", description: "Some file", json_schema: {"$ref" => "#/a"} }
     }.to raise_error(Docuconf::Anyway::DeclarationError, %r{file x: schema /\$ref: keyword \$ref is not supported})
   end
+
+  describe "constraints and types" do
+    def contract_var(klass, name)
+      Docuconf::Anyway::Exporter.new(name: "decl", classes: [klass]).contract["vars"][name]
+    end
+
+    it "infers the type from the constraints when nothing else decides it" do
+      klass = config do
+        attr_config :port, :timeout, :ratio, :origins, :ports, :hook, mode: "8080"
+        describe :port, "HTTP listen port", min: 1, max: 65_535
+        describe :mode, "Port from a string default", min: 1
+        describe :timeout, "Request timeout", min: "1s", max: "5m"
+        describe :ratio, "Sampling ratio", min: 0.0, max: 1.0
+        describe :origins, "CORS origins", min_items: 1
+        describe :ports, "Worker ports", item_min: 1
+        describe :hook, "Callback URL", schemes: %w[https]
+      end
+      expect(contract_var(klass, "DECL_PORT")).to include("type" => "int", "min" => 1, "max" => 65_535)
+      expect(contract_var(klass, "DECL_MODE")).to include("type" => "int", "min" => 1, "default" => 8080)
+      expect(contract_var(klass, "DECL_TIMEOUT")).to include("type" => "duration", "min" => "1s", "max" => "5m")
+      expect(contract_var(klass, "DECL_RATIO")).to include("type" => "float", "max" => 1.0)
+      expect(contract_var(klass, "DECL_ORIGINS")).to include("type" => "list", "items" => "string", "minItems" => 1)
+      expect(contract_var(klass, "DECL_PORTS")).to include("type" => "list", "items" => "int", "itemMin" => 1)
+      expect(contract_var(klass, "DECL_HOOK")).to include("type" => "url", "schemes" => ["https"])
+
+      with_env("DECL_PORT" => "70000") do
+        expect { klass.new }.to raise_error(Docuconf::Anyway::ValidationError, /DECL_PORT \[out_of_range\]: 70000 is above max 65535/)
+      end
+      with_env("DECL_PORT" => "443") { expect(klass.new.port).to eq 443 }
+    end
+
+    it "rejects a constraint that does not fit the type, naming the fix" do
+      expect(problems { attr_config debug: false; describe :debug, "Debug mode", min: 3 })
+        .to eq ["DECL_DEBUG: min applies to int, float or duration variables, but DECL_DEBUG is a bool (from its " \
+          "coercion or default). Add type: to `describe :debug` (for example type: :int), or give a default of that type"]
+      expect(problems { attr_config name: "x"; describe :name, "Some name", min_items: 2 })
+        .to contain_exactly(a_string_including("DECL_NAME: min_items applies to list variables, but DECL_NAME is a string"))
+      expect(problems { attr_config port: 1; describe :port, "Listen port", min_length: 2 })
+        .to contain_exactly(a_string_including("DECL_PORT: min_length applies to string variables, but DECL_PORT is a int"))
+      expect(problems { attr_config :u; coerce_types u: :string; describe :u, "Some url", schemes: %w[https] })
+        .to contain_exactly(a_string_including("DECL_U: schemes applies to url variables"))
+      expect(problems { attr_config t: 5; describe :t, "Some value", min: "1s" })
+        .to eq ['DECL_T: min "1s" is not an integer; for a duration, add type: :duration to `describe :t`']
+    end
+
+    it "lists the enum values when a default is not one of them" do
+      expect(problems { attr_config level: 8080; describe :level, "Log level", values: %w[a b] })
+        .to eq ["DECL_LEVEL: default 8080 is not one of a, b"]
+    end
+
+    it "explains a bad variable name in words, not a regex" do
+      expect(problems { env_prefix "x-y"; attr_config port: 1; describe :port, "Listen port" }.first)
+        .to include("uppercase letters, digits and '_'").and(satisfy { |m| !m.include?("\\A") })
+    end
+  end
+
+  describe "describe without the include" do
+    it "raises instead of falling through to another describe (RSpec's monkey patch)" do
+      stray = Module.new do
+        def describe(*) = :example_group
+      end
+      Module.include(stray)
+      expect {
+        Class.new(Anyway::Config) do
+          config_name :noinc
+          attr_config port: 8080
+          describe :port, "HTTP port", min: 1
+        end
+      }.to raise_error(NoMethodError, /describe needs `include Docuconf::Anyway`/)
+    ensure
+      stray.send(:remove_method, :describe)
+    end
+  end
 end

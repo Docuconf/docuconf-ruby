@@ -232,10 +232,6 @@ contract.#Contract & {
 		selector: "RAILS_ENV"
 		default:  "development"
 		defaults: {
-			development: {
-				GATEWAY_DEBUG:     true
-				GATEWAY_LOG_LEVEL: "debug"
-			}
 			production: {
 				GATEWAY_LOG_LEVEL:       "warn"
 				GATEWAY_REQUEST_TIMEOUT: "10s"

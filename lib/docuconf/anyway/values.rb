@@ -64,9 +64,19 @@ module Docuconf
           [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not a boolean (true or false)")]
         when "duration"
           ns = Duration.parse_wire(raw, var.encoding)
+          # A declared variable also reads Go syntax (30s), as its defaults
+          # do, so .env files and docker-compose can use either form. The
+          # contract still declares iso8601, which is what the platform
+          # renders.
+          if ns.nil? && var.respond_to?(:lenient_duration) && var.lenient_duration
+            ns = Duration.parse_go(raw)
+            ns = nil if ns&.negative?
+          end
           return [ns, nil] if ns
 
-          [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not #{Duration.describe_encoding(var.encoding)}")]
+          expected = Duration.describe_encoding(var.encoding)
+          expected += " or a Go duration such as 30s" if var.respond_to?(:lenient_duration) && var.lenient_duration
+          [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not #{expected}")]
         when "list" then parse_list(var, raw)
         when "json"
           begin

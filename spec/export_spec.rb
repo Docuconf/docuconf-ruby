@@ -39,18 +39,78 @@ RSpec.describe "contract export" do
     expect(ok).to be(true), out
   end
 
-  it "exports YAML values: environment sections as profiles selected by RAILS_ENV" do
-    data = Docuconf::Anyway::Exporter.new(name: "gw", classes: [Fixtures::GatewayConfig], root: FIXTURES).contract
+  it "exports YAML values: deployable environment sections as profiles selected by RAILS_ENV" do
+    exporter = Docuconf::Anyway::Exporter.new(name: "gw", classes: [Fixtures::GatewayConfig], root: FIXTURES)
+    data = exporter.contract
     expect(data["profiles"]).to eq(
       "selector" => "RAILS_ENV",
       "default" => "development",
       "defaults" => {
-        "development" => {"GATEWAY_DEBUG" => true, "GATEWAY_LOG_LEVEL" => "debug"},
         "production" => {"GATEWAY_LOG_LEVEL" => "warn", "GATEWAY_REQUEST_TIMEOUT" => "10s"},
         "staging" => {"GATEWAY_LOG_LEVEL" => "debug", "GATEWAY_SAMPLE_RATE" => 1.0}
       }
     )
     expect(data["vars"]["RAILS_ENV"]).to include("type" => "string", "default" => "development")
+    expect(exporter.warnings).to include(
+      "ignoring the development section of config/gateway.yml (not deployable profiles)",
+      a_string_including("RAILS_ENV defaults to development, which has no exported profile")
+    )
+  end
+
+  it "exports the profiles asked for, and the default profile given" do
+    data = Docuconf::Anyway::Exporter.new(name: "gw", classes: [Fixtures::GatewayConfig], root: FIXTURES,
+      export_profiles: %w[development production], default_profile: "production").contract
+    expect(data["profiles"]["defaults"].keys).to eq %w[development production]
+    expect(data["profiles"]["default"]).to eq "production"
+    expect(data["vars"]["RAILS_ENV"]["default"]).to eq "production"
+  end
+
+  it "accepts a dev/test secret in YAML, since those sections are not exported" do
+    Dir.mktmpdir do |root|
+      write_file(root, "config/orders.yml",
+        "development:\n  database_url: postgres://localhost/dev\ntest:\n  database_url: postgres://localhost/test\n" \
+        "production:\n  port: 443\n")
+      klass = anon(:orders) do
+        attr_config :database_url, port: 8080
+        required :database_url
+        describe :database_url, "Postgres connection string", type: :url, secret: true
+        describe :port, "HTTP listen port"
+      end
+      data = Docuconf::Anyway::Exporter.new(name: "orders", classes: [klass], root: root).contract
+      expect(data["profiles"]["defaults"]).to eq("production" => {"ORDERS_PORT" => 443})
+      expect(data["vars"]["ORDERS_DATABASE_URL"]).to include("required" => true, "secret" => true)
+
+      expect { Docuconf::Anyway::Exporter.new(name: "orders", classes: [klass], root: root, export_profiles: %w[development]).contract }
+        .to raise_error(Docuconf::Anyway::DeclarationError, /must not have a value in the development section/)
+    end
+  end
+
+  it "exports the same contract whatever the current environment, honouring required env:" do
+    klass = nil
+    contracts = %w[development test production].map do |env|
+      allow(Anyway::Settings).to receive(:current_environment).and_return(env)
+      klass = anon(:envreq) do
+        attr_config :database_url, :sentry_dsn, :debug_token
+        required :database_url, env: "production"
+        required :sentry_dsn, env: %w[staging production]
+        required :debug_token, env: :development
+        describe :database_url, "Postgres connection string"
+        describe :sentry_dsn, "Sentry DSN for errors"
+        describe :debug_token, "Token for the debug bar"
+      end
+      Docuconf::Anyway::Exporter.new(name: "envreq", classes: [klass]).to_cue
+    end
+    expect(contracts.uniq.size).to eq 1
+    vars = Docuconf::Anyway::Exporter.new(name: "envreq", classes: [klass]).contract["vars"]
+    expect(vars["ENVREQ_DATABASE_URL"]["required"]).to be true
+    expect(vars["ENVREQ_SENTRY_DSN"]["required"]).to be true
+    expect(vars["ENVREQ_DEBUG_TOKEN"]).not_to have_key("required")
+  end
+
+  it "fails when no config class is found, unless allow_empty" do
+    expect { Docuconf::Anyway::Exporter.new(name: "x", classes: []).contract }
+      .to raise_error(Docuconf::Anyway::DeclarationError, /no config classes found/)
+    expect(Docuconf::Anyway::Exporter.new(name: "x", classes: [], allow_empty: true).contract["vars"]).to eq({})
   end
 
   it "exports values of a non-environmental YAML file as defaults, making required ones optional" do
@@ -130,6 +190,48 @@ RSpec.describe "contract export" do
       ensure
         Docuconf::Anyway.export_mode = false
       end
+    end
+
+    it "fails when the files define no config class, unless --allow-empty" do
+      exe = File.expand_path("../exe/docuconf", __dir__)
+      lib = File.expand_path("../lib", __dir__)
+      out, status = Open3.capture2e(RbConfig.ruby, "-I", lib, exe, "export", "-n", "x")
+      expect(status.exitstatus).to eq 1
+      expect(out).to include("no config classes found").and include("config/configs/*.rb")
+
+      out, status = Open3.capture2e(RbConfig.ruby, "-I", lib, exe, "export", "-n", "x", "--allow-empty")
+      expect(status).to be_success, out
+      expect(out).to include("vars: {}")
+    end
+
+    it "--check exits 1 when the contract file is out of date, and writes nothing" do
+      Dir.mktmpdir do |dir|
+        out = File.join(dir, "contract.cue")
+        args = ["export", "-n", "sample-gateway", "--root", FIXTURES, "-c", "Fixtures::GatewayConfig", "-o", out, "--check",
+          File.expand_path("fixtures/gateway_config.rb", __dir__)]
+        err = StringIO.new
+        expect(Docuconf::Anyway::CLI.start(args, out: StringIO.new, err: err)).to eq 1
+        expect(err.string).to include("#{out} is missing")
+        expect(File.exist?(out)).to be false
+
+        File.write(out, File.read(GOLDEN))
+        err = StringIO.new
+        expect(Docuconf::Anyway::CLI.start(args, out: StringIO.new, err: err)).to eq 0
+        expect(err.string).to include("is up to date")
+
+        File.write(out, File.read(GOLDEN).sub("8080", "8081"))
+        expect(Docuconf::Anyway::CLI.start(args, out: StringIO.new, err: StringIO.new)).to eq 1
+      ensure
+        Docuconf::Anyway.export_mode = false
+      end
+    end
+
+    it "names a missing file instead of printing a backtrace" do
+      err = StringIO.new
+      expect(Docuconf::Anyway::CLI.start(["export", "-n", "x", "config/nope.rb"], out: StringIO.new, err: err)).to eq 2
+      expect(err.string).to eq "docuconf: invalid argument: config/nope.rb: no such file\n"
+    ensure
+      Docuconf::Anyway.export_mode = false
     end
 
     it "fails without --name" do
