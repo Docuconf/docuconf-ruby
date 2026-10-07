@@ -3,6 +3,8 @@
 The Ruby SDK for [docuconf](https://github.com/docuconf): typed configuration contracts between an
 application and the Kubernetes platform that runs it.
 
+Example: [`examples/orders`](examples/orders), a small Rack service with its exported contract.
+
 It extends [anyway_config](https://github.com/palkan/anyway_config) rather than replacing it. You keep your
 `Anyway::Config` classes, with `attr_config`, `required`, `coerce_types`, `config_name` and `env_prefix`,
 and anyway_config keeps loading YAML, credentials and the environment. docuconf adds:
@@ -332,7 +334,7 @@ values = contract.load(ENV) # => {"PORT" => 8080, "TIMEOUT" => 30.seconds, "ORIG
 ```
 
 `Docuconf::Anyway.load_contract(json, env: ENV)` does both steps. It reads every wire encoding of SPEC §5: `csv`
-lists with any `separator`, `json` lists and `indexed` lists (`NAME__0`, `NAME__1`, ...); `go`, `iso8601`,
+lists with any `separator`, `json` lists and `indexed` lists (`NAME__0`, `NAME__1`, ..., numbered from 0 with no gap; a gap is `invalid_type`); `go`, `iso8601`,
 `seconds` and `timespan` (`[d.]hh:mm:ss[.fff]`) durations. Values go through the same parsing and checks as the
 declaration path, profile defaults apply for the selected profile, and every problem is raised together as a
 `ValidationError` (also written to the termination log; pass `termination_log: false` to skip that). A

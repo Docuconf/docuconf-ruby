@@ -73,7 +73,7 @@ module Docuconf
         found = {}
         vars.each do |var|
           raw = raw_value(var, env)
-          value, failure = Values.from_env(var, raw)
+          value, failure = raw.is_a?(Values::Failure) ? [nil, raw] : Values.from_env(var, raw)
           if failure
             violations << violation(var, failure)
             found[var.name] = :failed
@@ -112,14 +112,31 @@ module Docuconf
 
       # The raw environment input of a variable: its value, or for an
       # indexed list the values of NAME__0, NAME__1, ... (nil when there are
-      # none).
+      # none). The list is present when any NAME__<n> is set, and its items
+      # must run from 0 with no gap (SPEC §5); a gap is a Values::Failure.
+      # Only decimal suffixes with no leading zero are items, so nested keys
+      # such as NAME__HOST are ignored.
       def raw_value(var, env)
         return env[var.name] unless var.type == "list" && var.encoding == "indexed"
 
+        prefix = "#{var.name}__"
+        count = env.each_key.filter_map { |k| k.delete_prefix(prefix)[INDEX_RE] if k.start_with?(prefix) }
+          .map { |s| s.to_i + 1 }.max
+        return nil unless count
+
         items = []
-        items << env["#{var.name}__#{items.size}"] while env.key?("#{var.name}__#{items.size}")
-        items.empty? ? nil : items
+        count.times do |i|
+          unless env.key?("#{prefix}#{i}")
+            return Values::Failure.new(:invalid_type,
+              "items must be numbered from #{prefix}0 with no gap, but #{prefix}#{i} is not set")
+          end
+          items << env["#{prefix}#{i}"]
+        end
+        items
       end
+
+      INDEX_RE = /\A(?:0|[1-9][0-9]*)\z/
+      private_constant :INDEX_RE
 
       # The default when a variable is unset: the selected profile's, then
       # the variable's own.

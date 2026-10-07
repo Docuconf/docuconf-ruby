@@ -53,3 +53,51 @@ jobs:
 
       - name: Build the gem
         run: gem build docuconf-anyway.gemspec
+
+  example:
+    # examples/orders: builds against the SDK in this repository, checks the
+    # committed contract is current and valid, and smoke-tests the service.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/orders
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: docuconf/docuconf-go
+          path: docuconf-go
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: examples/orders
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install cue
+        run: go install cuelang.org/go/cmd/cue@v0.17.1
+
+      - name: Build
+        run: bundle exec ruby -c config.ru server.rb config/orders_config.rb
+
+      - name: Contract is up to date
+        run: |
+          bundle exec docuconf export --name orders-api --package orders --out contract.cue config/orders_config.rb
+          git diff --exit-code -- contract.cue
+
+      - name: Contract passes cue vet
+        run: |
+          vet="$RUNNER_TEMP/vet"
+          mkdir -p "$vet/orders"
+          cp -r "$GITHUB_WORKSPACE/docuconf-go/spec/cue/cue.mod" "$GITHUB_WORKSPACE/docuconf-go/spec/cue/contract" "$vet/"
+          cp contract.cue "$vet/orders/"
+          cd "$vet" && cue vet -c ./orders
+
+      - name: Smoke test
+        run: ./smoke.sh
