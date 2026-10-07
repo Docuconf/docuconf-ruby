@@ -39,6 +39,22 @@ RSpec.describe "contract export" do
     expect(ok).to be(true), out
   end
 
+  it "exports length limits that pass cue vet -c" do
+    require_cue!
+    klass = anon(:lens) do
+      attr_config callback: "https://a.example/run", limits: nil, branches: %w[ZÜ01 BE]
+      coerce_types callback: :uri, limits: :json, branches: {type: :string, array: true}
+      describe :callback, "Where to report each run", schemes: %w[https], max_length: 24
+      describe :limits, "Run limits as a JSON object", max_length: 16
+      describe :branches, "Branch codes, two to four characters each", item_min_length: 2, item_max_length: 4
+    end
+    text = Docuconf::Anyway.export(name: "lens", classes: [klass])
+    expect(text).to match(/maxLength:\s+24/).and match(/maxLength:\s+16/)
+      .and match(/itemMinLength:\s+2/).and match(/itemMaxLength:\s+4/)
+    ok, out = cue_vet(text)
+    expect(ok).to be(true), out
+  end
+
   it "exports YAML values: deployable environment sections as profiles selected by RAILS_ENV" do
     exporter = Docuconf::Anyway::Exporter.new(name: "gw", classes: [Fixtures::GatewayConfig], root: FIXTURES)
     data = exporter.contract

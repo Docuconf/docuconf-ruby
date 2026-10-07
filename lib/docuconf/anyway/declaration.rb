@@ -18,7 +18,8 @@ module Docuconf
     # Options accepted by `describe` and `constrain`.
     VAR_OPTIONS = %i[
       type group examples config_key deprecated secret
-      min max min_length max_length pattern values schemes items min_items max_items item_min item_max schema json_schema
+      min max min_length max_length pattern values schemes items min_items max_items item_min item_max
+      item_min_length item_max_length schema json_schema
     ].freeze
 
     # One exported variable: an anyway_config attribute and its docuconf
@@ -74,6 +75,7 @@ module Docuconf
           h["max"] = c[:max] if c[:max]
         when "url"
           h["schemes"] = c[:schemes] if c[:schemes]
+          h["maxLength"] = c[:max_length] if c[:max_length]
         when "enum"
           h["values"] = c[:values]
         when "list"
@@ -84,7 +86,10 @@ module Docuconf
           h["maxItems"] = c[:max_items] if c[:max_items]
           h["itemMin"] = c[:item_min] if c[:item_min]
           h["itemMax"] = c[:item_max] if c[:item_max]
+          h["itemMinLength"] = c[:item_min_length] if c[:item_min_length]
+          h["itemMaxLength"] = c[:item_max_length] if c[:item_max_length]
         when "json"
+          h["maxLength"] = c[:max_length] if c[:max_length]
           h["schema"] = c[:schema] if c[:schema]
         end
         h["default"] = Declaration.contract_default(self, default) unless default.nil?
@@ -230,7 +235,8 @@ module Docuconf
           next if problems.size > before
 
           constraints = {}
-          %i[min max min_length max_length pattern schemes min_items max_items item_min item_max].each do |k|
+          %i[min max min_length max_length pattern schemes min_items max_items item_min item_max
+            item_min_length item_max_length].each do |k|
             constraints[k] = m[k] unless m[k].nil?
           end
           if %w[int float].include?(type)
@@ -244,6 +250,7 @@ module Docuconf
             end
           end
           check_item_bounds(type, items, constraints, problems, env)
+          check_lengths(type, items, constraints, problems, env)
           constraints[:values] = m[:values].map(&:to_s) if m[:values]
           if type == "duration"
             %i[min max].each do |k|
@@ -305,7 +312,9 @@ module Docuconf
           if !default.nil? && !secret
             cv, failure = Values.from_typed(var, default)
             if failure
-              problems << if type == "enum"
+              problems << if failure.code == :out_of_range
+                "#{env}: default #{failure.message}"
+              elsif type == "enum"
                 "#{env}: default #{default.inspect} is not one of #{constraints[:values].join(", ")}"
               else
                 "#{env}: default #{default.inspect} is not a valid #{type}"
@@ -410,7 +419,8 @@ module Docuconf
 
       # The type the constraints imply, or nil: min/max with Integer bounds
       # is int, with Float bounds float, with duration strings duration;
-      # min_items/max_items is a list (of int with item_min/item_max);
+      # min_items/max_items is a list (of int with item_min/item_max, of
+      # string with item_min_length/item_max_length);
       # schemes is a url.
       #
       # With a String default, only bounds decide, and only when the
@@ -429,6 +439,8 @@ module Docuconf
 
         if m.key?(:item_min) || m.key?(:item_max)
           return ["list", "int", nil]
+        elsif m.key?(:item_min_length) || m.key?(:item_max_length)
+          return ["list", "string", nil]
         elsif m.key?(:min_items) || m.key?(:max_items)
           return ["list", (m[:items] || "string").to_s, nil]
         elsif m.key?(:schemes)
@@ -452,7 +464,8 @@ module Docuconf
       # item bounds are checked where they are read).
       CONSTRAINT_TYPES = {
         %i[min max] => ["int, float or duration", %w[int float duration]],
-        %i[min_length max_length] => ["string", %w[string]],
+        %i[min_length] => ["string", %w[string]],
+        %i[max_length] => ["string, url or json", %w[string url json]],
         %i[schemes] => ["url", %w[url]],
         %i[min_items max_items] => ["list", %w[list]]
       }.freeze
@@ -532,6 +545,31 @@ module Docuconf
         end
         lo, hi = constraints.values_at(:item_min, :item_max)
         problems << "#{label}: #{names[:item_min]} #{lo} is above #{names[:item_max]} #{hi}" if lo && hi && lo > hi
+      end
+
+      # Length limits count characters (Unicode code points, SPEC §4.3):
+      # min_length/max_length on a string, max_length on a url or json, and
+      # item_min_length/item_max_length on each item of a string list. Each
+      # is a non-negative integer, and a minimum is not above its maximum.
+      def self.check_lengths(type, items, constraints, problems, label,
+        names: {min_length: "min_length", max_length: "max_length",
+                item_min_length: "item_min_length", item_max_length: "item_max_length"})
+        item = %i[item_min_length item_max_length].select { |k| constraints.key?(k) }
+        if !item.empty? && !(type == "list" && items == "string")
+          problems << "#{label}: #{names[:item_min_length]} and #{names[:item_max_length]} apply only to lists of string"
+          item.each { |k| constraints.delete(k) }
+        end
+        %i[min_length max_length item_min_length item_max_length].each do |k|
+          next unless constraints.key?(k)
+          next if constraints[k].is_a?(Integer) && !constraints[k].negative?
+
+          problems << "#{label}: #{names[k]} #{constraints[k].inspect} is not a non-negative integer"
+          constraints.delete(k)
+        end
+        [%i[min_length max_length], %i[item_min_length item_max_length]].each do |lo_k, hi_k|
+          lo, hi = constraints.values_at(lo_k, hi_k)
+          problems << "#{label}: #{names[lo_k]} #{lo} is above #{names[hi_k]} #{hi}" if lo && hi && lo > hi
+        end
       end
 
       def self.normalize_deprecated(d)

@@ -50,16 +50,24 @@ default the upcased `config_name`) + `_` + the upcased attribute, so `:port` in 
 | `float` | `:float`, a Float default, or Float `min:`/`max:` | `Float` |
 | `bool` | `:boolean`, or a `true`/`false` default | `true`/`false` |
 | `duration` | `:duration` (added by docuconf), or duration `min:`/`max:` (`"1s"`, `"PT5M"`) | `ActiveSupport::Duration`, or `Float` seconds without ActiveSupport |
-| `url` | `:uri`, `describe x, "...", type: :url`, or `schemes:` | `URI` / `String` |
+| `url` | `:uri`, `describe x, "...", type: :url`, or `schemes:`; `max_length:` bounds it | `URI` / `String` |
 | `enum` | `describe x, "...", values: [...]` | `String` |
-| `list` | `{type: :string \| :integer, array: true}`, an Array default, or `min_items:`/`max_items:` (`item_min:`/`item_max:` for ints) | `Array` |
-| `json` | `:json` (added by docuconf), or `type: :json`; `schema:` as for config files | parsed JSON |
+| `list` | `{type: :string \| :integer, array: true}`, an Array default, or `min_items:`/`max_items:` (`item_min:`/`item_max:` for ints, `item_min_length:`/`item_max_length:` for strings) | `Array` |
+| `json` | `:json` (added by docuconf), or `type: :json`; `schema:` as for config files, `max_length:` | parsed JSON |
 
 - **Metadata**: `describe :attr, "description", group:, examples:, config_key:, deprecated:, type:`, plus any
   constraint. `constrain :attr, ...` adds constraints alone: `min`, `max` (numbers, or durations in Go or
   ISO 8601 syntax), `min_length`, `max_length`, `pattern`, `values`, `schemes`, `min_items`, `max_items`,
   `item_min`/`item_max` (each item of an int list; exported as `itemMin`/`itemMax`, and an item outside them is
-  `out_of_range`), `schema`/`json_schema` (json only).
+  `out_of_range`), `item_min_length`/`item_max_length` (each item of a string list, after splitting, so a
+  separator is never counted; exported as `itemMinLength`/`itemMaxLength`), `schema`/`json_schema` (json only).
+- **Length limits**: `min_length` applies to strings; `max_length` to strings, urls and json values. Lengths
+  count characters (Unicode code points, Ruby's `String#length`), never bytes: `"日本"` is 2 and `"ZÜ01"` fits
+  `item_max_length: 4`. A json value is measured as the app receives it, whitespace included, before it is
+  parsed; a json value from YAML or a default has no wire form, so its compact JSON is measured. A value above
+  a limit is `out_of_range`, and a secret's message gives its length, never the value. `item_min_length` or
+  `item_max_length` on an int list, a limit that is not a non-negative integer, a minimum above its maximum, or
+  a default outside the limits is a `DeclarationError`.
 - **Type from constraints**: the order is `type:`, then `coerce_types`, then a typed default, then the
   constraints. So `attr_config :port` with `describe :port, "...", min: 1, max: 65_535` is an `int`, and so is
   `port: "8080"` (a String default that reads as the inferred type). A constraint that cannot apply to the
