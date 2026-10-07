@@ -50,9 +50,16 @@ RSpec.describe "contract-first mode" do
       "JSONL" => {"type" => "list", "description" => "Json list", "items" => "string", "encoding" => "json"},
       "IDX" => {"type" => "list", "description" => "Indexed", "items" => "int", "encoding" => "indexed", "itemMax" => 9}
     }
-    env = {"CSV" => "1;2", "JSONL" => '["a,b"]', "IDX__0" => "3", "IDX__1" => "4", "IDX__3" => "ignored"}
+    env = {"CSV" => "1;2", "JSONL" => '["a,b"]', "IDX__0" => "3", "IDX__1" => "4", "IDX__HOST" => "x", "IDX__01" => "x"}
     expect(load(vars, env)).to eq("CSV" => [1, 2], "JSONL" => ["a,b"], "IDX" => [3, 4])
     expect(codes_of(vars, {"IDX__0" => "10"})).to eq [["IDX", :out_of_range]]
+  end
+
+  it "rejects gaps in an indexed list" do
+    vars = {"IDX" => {"type" => "list", "description" => "Indexed", "items" => "string", "encoding" => "indexed"}}
+    expect(codes_of(vars, {"IDX__0" => "a", "IDX__2" => "c"})).to eq [["IDX", :invalid_type]]
+    expect(codes_of(vars, {"IDX__1" => "b"})).to eq [["IDX", :invalid_type]]
+    expect { load(vars, {"IDX__0" => "a", "IDX__2" => "c"}) }.to raise_error(/IDX__1 is not set/)
   end
 
   it "applies the selected profile's defaults" do
