@@ -95,7 +95,8 @@ RSpec.describe "loading a config" do
   describe "secrets" do
     it "are filtered from #inspect and pp" do
       c = orders_class.from_env("DATABASE_URL" => url)
-      expect(c.inspect).to include(':database_url=>"[FILTERED]"').and include(":port=>8080")
+      # Hash#inspect changed format in Ruby 3.4 (`port: 8080` instead of `:port=>8080`).
+      expect(c.inspect).to match(/:?database_url(=>|: )"\[FILTERED\]"/).and match(/:?port(=>|: )8080/)
       expect(c.inspect).not_to include("hunter2")
       expect(c.pretty_inspect).to include("[FILTERED]")
       expect(c.pretty_inspect).not_to include("hunter2")
