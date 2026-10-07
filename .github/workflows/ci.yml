@@ -87,9 +87,7 @@ jobs:
         run: bundle exec ruby -c config.ru server.rb config/orders_config.rb
 
       - name: Contract is up to date
-        run: |
-          bundle exec docuconf export --name orders-api --package orders --out contract.cue config/orders_config.rb
-          git diff --exit-code -- contract.cue
+        run: bundle exec docuconf export --name orders-api --package orders --out contract.cue --check config/orders_config.rb
 
       - name: Contract passes cue vet
         run: |
