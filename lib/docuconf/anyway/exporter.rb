@@ -25,17 +25,26 @@ module Docuconf
       # profiles:        read config/<name>.yml (default true)
       # selector:        the variable that picks the profile (default RAILS_ENV)
       # default_profile: the profile in effect when the selector is unset (default development)
+      # export_profiles: the YAML sections exported as profiles (default: every
+      #                  section except development and test, which are not deployed)
+      # allow_empty:     export a contract with no config classes instead of failing
+      #
+      # The contract never depends on the exporting process's RAILS_ENV.
       def initialize(name:, classes: nil, app_version: nil, root: nil, profiles: true, selector: "RAILS_ENV",
-        default_profile: "development")
+        default_profile: "development", export_profiles: nil, allow_empty: false)
         @name = name.to_s
         @classes = classes
         @app_version = app_version
         @root = root ? Pathname.new(root) : Pathname.new(Dir.pwd)
         @profiles = profiles
         @selector = selector
-        @default_profile = default_profile
+        @default_profile = default_profile.to_s
+        @export_profiles = export_profiles&.map(&:to_s)
+        @allow_empty = allow_empty
         @warnings = []
       end
+
+      NON_DEPLOYABLE = Declaration::NON_DEPLOYABLE_ENVS
 
       def classes
         list = @classes || Docuconf::Anyway.configs.select do |k|
@@ -47,7 +56,12 @@ module Docuconf
       # The contract as data (Hash with String keys).
       def contract
         problems = []
-        problems << "service name #{@name.inspect} must be a DNS label (#{NAME_RE.source})" unless NAME_RE.match?(@name)
+        problems << "service name #{@name.inspect} must be a DNS label: lowercase letters, digits and '-', at most 63 characters, starting and ending with a letter or digit (e.g. orders-api)" unless NAME_RE.match?(@name)
+
+        if classes.empty? && !@allow_empty
+          raise DeclarationError, ["no config classes found: no loaded class includes Docuconf::Anyway " \
+            "(did you pass the config files, e.g. config/configs/*.rb? Use --allow-empty if this is intended)"]
+        end
 
         decls = []
         classes.each do |k|
@@ -87,7 +101,14 @@ module Docuconf
             var_decls[v.name] = v
           end
 
+          ignored = by_profile.keys.reject { |p| export_profile?(p) }
+          unless ignored.empty?
+            @warnings << "ignoring the #{ignored.join(" and ")} section#{"s" if ignored.size > 1} of " \
+              "#{yaml_path(d.klass)} (not deployable profiles)"
+          end
           by_profile.each do |profile, values|
+            next unless export_profile?(profile)
+
             values.each do |key, raw|
               v = d.var(key)
               next unless v
@@ -142,6 +163,12 @@ module Docuconf
 
         raise DeclarationError, problems unless problems.empty?
 
+        if !profile_defaults.empty? && !profile_defaults.key?(@default_profile)
+          @warnings << "#{@selector} defaults to #{@default_profile}, which has no exported profile: set " \
+            "#{@selector} in the deployment, or the default profile (--default-profile, DEFAULT_PROFILE= or " \
+            "config.docuconf.default_profile)"
+        end
+
         metadata = {"name" => @name}
         metadata["appVersion"] = @app_version.to_s if @app_version
         metadata["generator"] = {"language" => "ruby", "sdk" => SDK_NAME, "version" => VERSION}
@@ -175,6 +202,10 @@ module Docuconf
       end
 
       private
+
+      def export_profile?(profile)
+        @export_profiles ? @export_profiles.include?(profile.to_s) : !NON_DEPLOYABLE.include?(profile.to_s)
+      end
 
       def contract_value(var, raw, where, problems)
         cv, failure = Values.from_typed(var, raw)
@@ -266,8 +297,12 @@ module Docuconf
     end
 
     # Exports a contract as CUE text. See Exporter#initialize for options.
-    def self.export(name:, package: nil, **options)
-      Exporter.new(name: name, **options).to_cue(package: package)
+    # Warnings (ignored YAML sections, ...) go to `warn`, a callable.
+    def self.export(name:, package: nil, warn: ->(m) { Docuconf::Anyway.warn(m) }, **options)
+      exporter = Exporter.new(name: name, **options)
+      text = exporter.to_cue(package: package)
+      exporter.warnings.each { |w| warn&.call(w) }
+      text
     end
   end
 end

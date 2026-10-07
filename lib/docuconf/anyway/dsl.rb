@@ -33,6 +33,37 @@ module Docuconf
         docuconf_merge_meta(attr, options.merge(description: description))
       end
 
+      # anyway_config's `required`, also remembered unfiltered: anyway_config
+      # keeps only the names that apply to the current environment, but the
+      # contract must not depend on RAILS_ENV at export time.
+      def required(*names, env: nil, **nested)
+        super
+        names.each { |n| docuconf_required_envs[n.to_sym] << env }
+        @docuconf_declaration = nil
+      end
+
+      # attribute => [env spec, ...] for every `required` call, whatever the
+      # current environment.
+      def docuconf_required_envs
+        @docuconf_required_envs ||=
+          if superclass.respond_to?(:docuconf_required_envs)
+            superclass.docuconf_required_envs.transform_values(&:dup).tap { |h| h.default_proc = proc { |hh, k| hh[k] = [] } }
+          else
+            Hash.new { |h, k| h[k] = [] }
+          end
+      end
+
+      # Whether the contract marks the attribute required: it is required in
+      # some deployable environment (any but development and test), or
+      # anyway_config currently lists it (a `required` made before the
+      # include).
+      def docuconf_required_in_contract?(attr)
+        envs = docuconf_required_envs.fetch(attr.to_sym, nil)
+        return required_attributes.include?(attr.to_sym) if envs.nil? || envs.empty?
+
+        envs.any? { |e| Declaration.deployable_env_spec?(e) }
+      end
+
       # Marks attributes as secret: values never appear in errors or the
       # contract, and the platform must supply them from a Secret.
       def secret(*attrs)

@@ -285,7 +285,7 @@ module Docuconf
           end
 
           secret = m[:secret] == true
-          required = klass.required_attributes.include?(attr) && default.nil?
+          required = klass.docuconf_required_in_contract?(attr) && default.nil?
           if secret && !default.nil?
             problems << "#{env}: a secret must not have a default (it would ship in the image)"
           end
@@ -325,6 +325,22 @@ module Docuconf
         raise DeclarationError, problems unless problems.empty?
 
         new(klass, vars, files, nested, warnings, overlays)
+      end
+
+      NON_DEPLOYABLE_ENVS = %w[development test].freeze
+
+      # Whether an anyway_config `required ..., env:` spec applies to some
+      # environment the app is deployed in (anything but development and
+      # test): nil (always), a name or list of names, or {except: [...]}.
+      def self.deployable_env_spec?(spec)
+        case spec
+        when nil then true
+        when Hash
+          # {except: [...]}: some deployable environment is always left.
+          true
+        else
+          Array(spec).flatten.map(&:to_s).any? { |e| !NON_DEPLOYABLE_ENVS.include?(e) }
+        end
       end
 
       def self.env_name(klass, attr)

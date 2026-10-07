@@ -83,10 +83,15 @@ module Docuconf
           opts.on("--default-profile NAME", "Section used when the selector is unset (default: development)") do |v|
             o[:default_profile] = v
           end
+          opts.on("--profile NAME", "Export this YAML section as a profile (repeatable; default: every section " \
+            "except development and test)") { |v| (o[:export_profiles] ||= []) << v }
+          opts.on("--allow-empty", "Export a contract with no variables when no config class is found") { o[:allow_empty] = true }
+          opts.on("--check", "With --out: do not write; exit 1 if FILE is missing or out of date") { o[:check] = true }
           common(opts, o)
         end
         files = parser.parse(argv)
         raise OptionParser::MissingArgument, "--name" unless o[:name]
+        raise OptionParser::InvalidArgument, "--check needs --out FILE" if o[:check] && !o[:out]
 
         Docuconf::Anyway.export_mode = true
         classes = load_files(o, files)
@@ -94,7 +99,19 @@ module Docuconf
                    profiles: o[:profiles], package: o[:package]}
         options[:selector] = o[:selector] if o[:selector]
         options[:default_profile] = o[:default_profile] if o[:default_profile]
-        text = Docuconf::Anyway.export(**options)
+        options[:export_profiles] = o[:export_profiles] if o[:export_profiles]
+        options[:allow_empty] = true if o[:allow_empty]
+        text = Docuconf::Anyway.export(**options, warn: ->(m) { @err.puts "docuconf: #{m}" })
+        if o[:check]
+          current = File.exist?(o[:out]) ? File.read(o[:out]) : nil
+          if current == text
+            @err.puts "docuconf: #{o[:out]} is up to date"
+            return 0
+          end
+          @err.puts "docuconf: #{o[:out]} is #{current ? "out of date" : "missing"}; regenerate it with the same " \
+            "command without --check"
+          return 1
+        end
         if o[:out]
           File.write(o[:out], text)
           @err.puts "docuconf: wrote #{o[:out]}"
