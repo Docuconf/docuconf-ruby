@@ -5,7 +5,8 @@ gives an app:
 
 - a normal [anyway_config](https://github.com/palkan/anyway_config) class, with docuconf's `describe` and
   `secret` adding descriptions, secrets and constraints ([`config/orders_config.rb`](config/orders_config.rb));
-- one check at boot that reports every problem at once, with stable codes ([`config.ru`](config.ru));
+- one check at boot, `OrdersConfig.load!`, that reports every problem at once with stable codes and exits 1
+  ([`config.ru`](config.ru));
 - a CUE contract exported from the class, for the platform to validate before it deploys
   ([`contract.cue`](contract.cue)).
 
@@ -15,7 +16,7 @@ gives an app:
 | `LOG_LEVEL` | enum | `debug`, `info`, `warn`, `error`; default `info` |
 | `DATABASE_URL` | url | secret, required, scheme `postgres` |
 | `ALLOWED_ORIGINS` | list of strings, comma-separated | at least 1 item; default `http://localhost:3000` |
-| `REQUEST_TIMEOUT` | duration, ISO 8601 (`PT30S`) | `1s`–`5m`, default `30s` |
+| `REQUEST_TIMEOUT` | duration, ISO 8601 (`PT30S`); `30s` also works locally | `1s`–`5m`, default `30s` |
 | `WORKER_COUNT` | int | 1–64, default `4` |
 
 The names have no prefix because the class sets `env_prefix ""`. Lists and durations use the encodings
@@ -46,7 +47,7 @@ the first:
 ```console
 $ PORT=0 bundle exec ruby server.rb
 docuconf: 2 configuration problems:
-  - DATABASE_URL [missing_required]: required, and not set
+  - DATABASE_URL [missing_required]: required, and not set: set DATABASE_URL in the environment (a secret cannot come from a file)
   - PORT [out_of_range]: 0 is below min 1
 $ echo $?
 1
@@ -57,11 +58,13 @@ $ echo $?
 ## Export the contract
 
 `contract.cue` is generated; never edit it by hand. Re-export it after changing
-`config/orders_config.rb` (CI fails if it is out of date):
+`config/orders_config.rb`:
 
 ```console
 $ bundle exec docuconf export --name orders-api --package orders --out contract.cue config/orders_config.rb
 ```
+
+CI runs the same command with `--check`, which writes nothing and exits 1 if `contract.cue` is out of date.
 
 ## Deploy
 

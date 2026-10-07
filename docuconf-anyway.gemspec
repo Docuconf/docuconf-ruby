@@ -22,7 +22,9 @@ Gem::Specification.new do |spec|
     "source_code_uri" => spec.homepage,
     "changelog_uri" => "#{spec.homepage}/releases",
     "bug_tracker_uri" => "#{spec.homepage}/issues",
-    "rubygems_mfa_required" => "true"
+    "rubygems_mfa_required" => "true",
+    # Links the gem to this repository on GitHub Packages (rubygems.pkg.github.com).
+    "github_repo" => "ssh://github.com/Docuconf/docuconf-ruby"
   }
 
   spec.files = Dir["lib/**/*.{rb,rake}", "exe/*", "README.md", "LICENSE"]

@@ -20,6 +20,30 @@ module Docuconf
     class Watcher
       DEFAULT_INTERVAL = 2.0
 
+      # Started watchers, held weakly, so a forked child can restart them.
+      REGISTRY = ObjectSpace::WeakMap.new
+      REGISTRY_LOCK = Mutex.new
+
+      # Threads do not survive fork: start each live watcher's thread again
+      # in the child. Called after every Process.fork (see ForkHook).
+      def self.restart_all
+        list = []
+        REGISTRY.each_key { |w| list << w }
+        list.each(&:restart)
+        list.size
+      end
+
+      # Restarts watcher threads in a forked child, so reload: :watch keeps
+      # working in Puma cluster workers (preload_app!) and similar.
+      module ForkHook
+        def _fork
+          pid = super
+          Docuconf::Anyway::Watcher.restart_all if pid.zero?
+          pid
+        end
+      end
+      Process.singleton_class.prepend(ForkHook) if Process.respond_to?(:_fork)
+
       def self.start(config, interval: nil)
         decl = config.class.docuconf_declaration
         files = decl.files.select { |f| f.reload == "watch" }
@@ -51,6 +75,24 @@ module Docuconf
         # config alive in return.
         @config_ref = WeakRef.new(@config)
         @config = nil
+        REGISTRY[self] = true
+        start_thread
+      end
+
+      # Starts the polling thread again, after fork. A no-op if the config
+      # is gone or the watcher was stopped.
+      def restart
+        return self unless @config_ref && !@stopped && @config_ref.weakref_alive?
+        return self if @thread&.alive?
+
+        start_thread
+      rescue WeakRef::RefError
+        self
+      end
+
+      def alive? = @thread&.alive? ? true : false
+
+      private def start_thread
         @thread = Thread.new do
           Thread.current.name = "docuconf-watch"
           loop do
@@ -69,6 +111,7 @@ module Docuconf
       end
 
       def stop
+        @stopped = true
         @thread&.kill
         @thread = nil
       end

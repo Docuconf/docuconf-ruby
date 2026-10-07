@@ -147,15 +147,16 @@ module Docuconf
       end
 
       # The value handed to the application: an ActiveSupport::Duration when
-      # ActiveSupport is loaded, otherwise a number of seconds (an Integer
-      # when whole, else a Rational).
+      # ActiveSupport is loaded, otherwise a Float number of seconds (30.0,
+      # 0.5), whatever the value, so `sleep timeout` and
+      # `timeout.is_a?(Float)` behave the same for PT30S and PT0.5S.
       def build(ns)
         secs = Rational(ns, 1_000_000_000)
-        secs = secs.to_i if secs.denominator == 1
         if defined?(::ActiveSupport::Duration)
+          secs = secs.to_i if secs.denominator == 1
           ::ActiveSupport::Duration.build(secs)
         else
-          secs
+          secs.to_f
         end
       end
 

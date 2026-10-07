@@ -155,7 +155,7 @@ module Docuconf
         value_failures = docuconf_config.docuconf_overlay_value_failures
         value_failures.clear
         decl.overlays.each do |o|
-          path = Overlays.resolve_path(o)
+          path = Overlays.resolve_path(o, docuconf_config.docuconf_env_source)
           values, problems = Overlays.read(decl, o, path, value_failures)
           values.each_key { |k| value_failures.delete(k.to_sym) }
           problems.each { |f| failures << [o, f] }
