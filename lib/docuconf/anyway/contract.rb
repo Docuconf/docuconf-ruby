@@ -62,7 +62,28 @@ module Docuconf
           Docuconf::Anyway.write_termination_log(error.message) if termination_log
           raise error
         end
-        values.to_h { |name, v| [name, v && var(name).type == "duration" ? Duration.build(v) : v] }
+        out = Loaded.new
+        values.each { |name, v| out[name] = v && var(name).type == "duration" ? Duration.build(v) : v }
+        out.secret_names = vars.select(&:secret).map(&:name)
+        out
+      end
+
+      # The values Contract#load returns: a Hash whose #inspect and pp show
+      # secret values as [FILTERED].
+      class Loaded < Hash
+        attr_writer :secret_names
+
+        def inspect = filtered.inspect
+        alias_method :to_s, :inspect
+
+        def pretty_print(q) = q.pp(filtered)
+
+        private
+
+        def filtered
+          names = @secret_names || []
+          {}.merge(self).to_h { |k, v| [k, names.include?(k) && !v.nil? ? "[FILTERED]" : v] }
+        end
       end
 
       # Returns [contract values by name, violations] without raising.

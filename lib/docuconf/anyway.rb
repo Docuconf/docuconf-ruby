@@ -15,6 +15,7 @@ require_relative "anyway/tls"
 require_relative "anyway/files"
 require_relative "anyway/overlays"
 require_relative "anyway/watcher"
+require_relative "anyway/hints"
 require_relative "anyway/validator"
 require_relative "anyway/cue"
 require_relative "anyway/exporter"
@@ -66,6 +67,33 @@ module Docuconf
         super
         Docuconf::Anyway.register(subclass)
       end
+
+      # Loads the config from an explicit environment instead of ENV, for
+      # tests: no process environment is read or changed, no file watcher
+      # starts and no termination log is written. `file_root` prefixes
+      # absolute file and overlay paths (as DOCUCONF_FILE_ROOT does).
+      # config/<name>.yml and credentials are still read, as usual. Raises
+      # ValidationError with every problem.
+      #
+      #   OrdersConfig.from_env({"PORT" => "0"})  # => raises, PORT [out_of_range]
+      #   OrdersConfig.from_env("PORT" => "0")  # the same, without braces
+      def from_env(env = {}, file_root: nil, overrides: nil, **vars)
+        env = env.to_h.merge(vars).to_h { |k, v| [k.to_s, v.nil? ? nil : v.to_s] }.compact
+        env["DOCUCONF_FILE_ROOT"] = file_root.to_s if file_root
+        Docuconf::Anyway.with_load_env(env.freeze) { new(overrides) }
+      end
+
+      # Loads the config, or prints every problem and exits 1: the boot
+      # one-liner.
+      #
+      #   CONFIG = OrdersConfig.load!
+      #
+      # On failure it prints `docuconf: N configuration problems:` and one
+      # line per problem to stderr, writes the termination log and exits 1,
+      # without a backtrace.
+      def load!(overrides = nil)
+        Docuconf::Anyway.exit_on_failure { new(overrides) }
+      end
     end
 
     class << self
@@ -94,19 +122,96 @@ module Docuconf
       def validate_all!(classes = nil)
         classes ||= configs.select { |k| k.name && (!k.config_attributes.empty? || !k.docuconf_file_decls.empty?) }
         violations = []
+        problems = []
         # These instances are thrown away: do not start file watchers for them.
-        Thread.current[:docuconf_no_watch] = true
-        classes.each do |k|
-          k.new
-        rescue ValidationError => e
-          violations.concat(e.violations)
+        begin
+          Thread.current[:docuconf_no_watch] = true
+          classes.each do |k|
+            k.new
+          rescue ValidationError => e
+            violations.concat(e.violations)
+          rescue DeclarationError => e
+            problems.concat(classes.size > 1 ? e.problems.map { |p| "#{k.name}: #{p}" } : e.problems)
+          end
+        ensure
+          Thread.current[:docuconf_no_watch] = nil
         end
-        Thread.current[:docuconf_no_watch] = nil
+        raise DeclarationError, problems unless problems.empty?
         return true if violations.empty?
 
         error = ValidationError.new(violations)
         write_termination_log(error.message)
         raise error
+      end
+
+      # Runs the block (loading configs); on a ValidationError or
+      # DeclarationError prints the message, writes the termination log and
+      # exits 1.
+      def exit_on_failure(err: $stderr)
+        yield
+      rescue ValidationError, DeclarationError => e
+        write_termination_log(e.message)
+        err.puts e.message
+        exit 1
+      end
+
+      # Loads every config class (or the given ones), or prints every
+      # problem and exits 1.
+      def load_all!(classes = nil)
+        exit_on_failure { validate_all!(classes) }
+      end
+
+      # Loads configs inside the block from `env` instead of ENV.
+      def with_load_env(env)
+        saved = Thread.current[:docuconf_load_env]
+        Thread.current[:docuconf_load_env] = env
+        yield
+      ensure
+        Thread.current[:docuconf_load_env] = saved
+      end
+
+      # A duration from a config (ActiveSupport::Duration or seconds) in Go
+      # syntax: "30s", "1m30s".
+      def format_duration(value)
+        ns = Duration.to_ns(value)
+        raise ArgumentError, "not a duration: #{value.inspect}" if ns.nil?
+
+        Duration.format_go(ns)
+      end
+
+      # Every secret attribute and variable name of every loaded docuconf
+      # class, as strings: database_url and DATABASE_URL.
+      def secret_names
+        configs.each_with_object(Set.new) do |k, out|
+          next unless k.name
+
+          decl = begin
+            k.docuconf_declaration
+          rescue StandardError
+            next
+          end
+          decl.vars.each do |v|
+            next unless v.secret
+
+            out << v.attr.to_s << v.name
+          end
+        end
+      end
+
+      # A Rails filter_parameters entry: filters a parameter named like a
+      # declared secret.
+      def filter_secret_parameter(key, value)
+        return unless value.is_a?(String) && !value.frozen?
+        return unless secret_names.include?(key.to_s)
+
+        value.replace("[FILTERED]")
+      end
+
+      # Restarts reload: :watch threads in a forked child (Puma cluster mode
+      # with preload_app!, Unicorn, Resque). Called automatically after
+      # Process.fork; call it yourself only for a fork docuconf cannot see.
+      def restart_watchers!
+        Watcher.restart_all
       end
 
       # Prints a warning; by default each distinct message only once.
@@ -121,6 +226,45 @@ module Docuconf
 
     # Instance behaviour added to the config class.
     module InstanceMethods
+      FILTERED = "[FILTERED]"
+
+      # The environment this config was loaded from: ENV, or the map given
+      # to .from_env.
+      def docuconf_env_source
+        @docuconf_env_source || ENV
+      end
+
+      def docuconf_isolated? = !@docuconf_env_source.nil?
+
+      # anyway_config's inspect and pp print every value; secrets are shown
+      # as [FILTERED].
+      def inspect
+        "#<#{self.class}:0x#{format("%016x", object_id)} config_name=#{config_name.inspect} " \
+          "env_prefix=#{env_prefix.inspect} values=#{docuconf_filtered_values.inspect}>"
+      end
+
+      def pretty_print(q)
+        q.group(1, "#<#{self.class}", ">") do
+          q.breakable
+          q.text "config_name=#{config_name.inspect}"
+          q.breakable
+          q.text "env_prefix=#{env_prefix.inspect}"
+          q.breakable
+          q.text "values="
+          q.pp docuconf_filtered_values
+        end
+      end
+
+      def docuconf_filtered_values
+        secrets = docuconf_secret_attrs
+        values.to_h { |k, v| [k, secrets.include?(k.to_sym) && !v.nil? ? FILTERED : v] }
+      end
+
+      def docuconf_secret_attrs
+        self.class.docuconf_declaration.vars.select(&:secret).map(&:attr)
+      rescue StandardError
+        self.class.docuconf_var_meta.select { |_, m| m[:secret] }.keys
+      end
       # Loaded file inputs, by accessor name. Each also has a reader method.
       def docuconf_files
         @docuconf_files ||= {}
@@ -165,7 +309,31 @@ module Docuconf
 
       def load(overrides = nil)
         @docuconf_overrides = overrides
+        @docuconf_env_source ||= Thread.current[:docuconf_load_env]
         super
+      rescue ::Anyway::Config::ValidationError, ArgumentError, TypeError, RuntimeError => e
+        raise if e.is_a?(ValidationError) || e.is_a?(DeclarationError)
+
+        # An on_load callback (the app's own validation) may put a value in
+        # its message: never a secret one.
+        scrubbed = docuconf_scrub(e.message)
+        raise if scrubbed == e.message
+
+        raise e.exception(scrubbed)
+      end
+
+      # Replaces the value of every secret attribute in text.
+      def docuconf_scrub(text)
+        docuconf_secret_attrs.each do |a|
+          v = values[a]
+          v = v.to_s unless v.nil?
+          next if v.nil? || v.length < 3
+
+          text = text.gsub(v, FILTERED)
+        end
+        text
+      rescue StandardError
+        text
       end
 
       # Replaces anyway_config's loop over its loaders, so docuconf sees the
@@ -181,7 +349,7 @@ module Docuconf
         decl = self.class.docuconf_declaration
         @docuconf_env = {}
         filter = self.class.configuration_sources
-        Overlays.check_location!(decl.overlays, opts[:config_path]) unless decl.overlays.empty?
+        Overlays.check_location!(decl.overlays, opts[:config_path], docuconf_env_source) unless decl.overlays.empty?
         docuconf_loaders(decl).each do |(id, loader)|
           if id == OverlayLoader::ID
             next if decl.overlays.empty?
@@ -191,7 +359,7 @@ module Docuconf
           end
           next if filter && !filter.include?(id)
 
-          data = loader.call(**opts)
+          data = id == :env && docuconf_isolated? ? docuconf_env_data(opts[:env_prefix]) : loader.call(**opts)
           docuconf_take_env(decl, data) if id == :env
           ::Anyway::Utils.deep_merge!(base_config, data)
         end
@@ -200,6 +368,11 @@ module Docuconf
       end
 
       private
+
+      # What anyway_config's :env loader reads, from the explicit map.
+      def docuconf_env_data(prefix)
+        ::Anyway::Env.new(type_cast: ::Anyway::NoCast, env_container: docuconf_env_source).fetch(prefix.to_s)
+      end
 
       # anyway_config's loaders, with the overlay loader before :env even if
       # it could not be registered.
@@ -252,18 +425,25 @@ module Docuconf
       end
 
       def docuconf_validate!
-        if Docuconf::Anyway.skip_validation?
-          Validator.new(self).load_files_leniently
+        env = docuconf_env_source
+        if Docuconf::Anyway.skip_validation?(env)
+          Validator.new(self, env: env).load_files_leniently
           return
         end
 
-        violations = Validator.new(self).run
+        Hints.warn_typos(self.class, env) unless Thread.current[:docuconf_reloading]
+        violations = Validator.new(self, env: env).run
         unless violations.empty?
           error = ValidationError.new(violations)
           # A rejected overlay reload keeps the running config: not a crash.
-          Docuconf::Anyway.write_termination_log(error.message) unless Thread.current[:docuconf_reloading]
+          # A test loading from an explicit env writes nothing.
+          unless Thread.current[:docuconf_reloading] || docuconf_isolated?
+            Docuconf::Anyway.write_termination_log(error.message)
+          end
           raise error
         end
+        return if docuconf_isolated?
+
         Watcher.start(self) if Docuconf::Anyway.watch_files && !Thread.current[:docuconf_no_watch]
       end
     end

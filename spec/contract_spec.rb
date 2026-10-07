@@ -110,4 +110,14 @@ RSpec.describe "contract-first mode" do
     }
     expect { Docuconf::Anyway::Contract.parse("{") }.to raise_error(Docuconf::Anyway::DeclarationError, /not valid JSON/)
   end
+
+  it "filters secrets from #inspect and pp of the loaded values" do
+    values = load({"TOKEN" => {"type" => "string", "description" => "API token", "secret" => true},
+                   "PORT" => {"type" => "int", "description" => "Listen port"}}, {"TOKEN" => "tok_hunter2", "PORT" => "80"})
+    expect(values["TOKEN"]).to eq "tok_hunter2"
+    expect(values).to eq("TOKEN" => "tok_hunter2", "PORT" => 80)
+    expect(values.inspect).to include("[FILTERED]").and include("80")
+    expect(values.inspect).not_to include("hunter2")
+    expect(values.pretty_inspect).not_to include("hunter2")
+  end
 end
