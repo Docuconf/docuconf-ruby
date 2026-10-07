@@ -280,3 +280,10 @@ Docuconf::Anyway::OverlayLoader.register
 # JSON string.
 Anyway::TypeRegistry.default.accept(:duration) { |v| Docuconf::Anyway::Duration.cast(v) }
 Anyway::TypeRegistry.default.accept(:json) { |v| v.is_a?(String) ? JSON.parse(v) : v }
+
+Anyway::Config.extend(Docuconf::Anyway::MissingIncludeGuard)
+
+module Docuconf
+  # Short name for schema helpers: `schema: {plans: Docuconf::S.array(...)}`.
+  S = Anyway::Schema
+end

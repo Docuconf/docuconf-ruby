@@ -2,6 +2,23 @@
 
 module Docuconf
   module Anyway
+    # `describe` on an Anyway::Config subclass that lacks
+    # `include Docuconf::Anyway`. Without this guard, a test suite that
+    # loads RSpec with its monkey patches would turn the call into an
+    # example group, silently dropping the declaration.
+    module MissingIncludeGuard
+      %i[describe constrain secret].each do |m|
+        define_method(m) do |*args, **kw, &block|
+          if self <= ::Anyway::Config && !singleton_class.include?(ClassMethods)
+            raise NoMethodError, "#{m} needs `include Docuconf::Anyway` in #{name || "this Anyway::Config class"} " \
+              "(add it before the first #{m})"
+          end
+
+          super(*args, **kw, &block)
+        end
+      end
+    end
+
     # Class macros added to an Anyway::Config subclass by
     # `include Docuconf::Anyway`.
     module ClassMethods

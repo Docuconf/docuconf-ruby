@@ -25,7 +25,7 @@ module Docuconf
     # metadata.
     class VarDecl
       attr_reader :attr, :name, :type, :description, :secret, :required, :default, :constraints,
-        :group, :examples, :config_key, :deprecated, :items, :regexp, :coercion
+        :group, :examples, :config_key, :deprecated, :items, :regexp, :coercion, :lenient_duration
 
       def initialize(**kw)
         kw.each { |k, v| instance_variable_set(:"@#{k}", v) }
@@ -219,15 +219,29 @@ module Docuconf
             next
           end
           problems << "#{env}: description must be at least 5 characters" if desc.to_s.strip.length < 5
-          problems << "#{env}: is not a valid environment variable name (#{ENV_NAME_RE.source})" unless ENV_NAME_RE.match?(env)
+          problems << "#{env}: is not a valid environment variable name: uppercase letters, digits and '_', starting with a letter (set env_prefix or rename the attribute)" unless ENV_NAME_RE.match?(env)
           if FEATURE_FLAG_RE.match?(env)
             warnings << "#{env} looks like a feature flag; flags that change without a rollout belong in a flag " \
               "service, not in environment configuration (SPEC §10)"
           end
 
+          before = problems.size
+          check_constraint_types(m, type, env, attr, problems)
+          next if problems.size > before
+
           constraints = {}
           %i[min max min_length max_length pattern schemes min_items max_items item_min item_max].each do |k|
             constraints[k] = m[k] unless m[k].nil?
+          end
+          if %w[int float].include?(type)
+            %i[min max].each do |k|
+              next if constraints[k].nil?
+              next if type == "int" ? constraints[k].is_a?(Integer) : constraints[k].is_a?(Numeric)
+
+              problems << "#{env}: #{k} #{constraints[k].inspect} is not #{type == "int" ? "an integer" : "a number"}" \
+                "#{"; for a duration, add type: :duration to `describe :#{attr}`" if constraints[k].is_a?(String)}"
+              constraints.delete(k)
+            end
           end
           check_item_bounds(type, items, constraints, problems, env)
           constraints[:values] = m[:values].map(&:to_s) if m[:values]
@@ -284,13 +298,18 @@ module Docuconf
             attr: attr, name: env, type: type, description: desc.to_s, secret: secret, required: required,
             default: default, constraints: constraints, group: m[:group]&.to_s,
             examples: m[:examples]&.map(&:to_s), config_key: m[:config_key]&.to_s || "#{klass.config_name}.#{attr}",
-            deprecated: deprecated, items: items, regexp: regexp, coercion: coercion_for(type, items)
+            deprecated: deprecated, items: items, regexp: regexp, coercion: coercion_for(type, items),
+            lenient_duration: type == "duration"
           )
 
           if !default.nil? && !secret
             cv, failure = Values.from_typed(var, default)
             if failure
-              problems << "#{env}: default #{default.inspect} is not a valid #{type}"
+              problems << if type == "enum"
+                "#{env}: default #{default.inspect} is not one of #{constraints[:values].join(", ")}"
+              else
+                "#{env}: default #{default.inspect} is not a valid #{type}"
+              end
             else
               Values.check(var, cv).each { |f| problems << "#{env}: default #{f.message}" }
             end
@@ -348,6 +367,14 @@ module Docuconf
 
         return ["enum", nil, nil] if m[:values]
 
+        # No type, coercion or typed default: let the constraints decide, so
+        # `describe :port, "...", min: 1, max: 65535` is an int, not an
+        # unbounded string.
+        if default.nil? || default.is_a?(String)
+          inferred = type_from_constraints(m, default)
+          return inferred if inferred
+        end
+
         case default
         when Integer then ["int", nil, nil]
         when Float then ["float", nil, nil]
@@ -362,6 +389,69 @@ module Docuconf
           else
             ["string", nil, nil]
           end
+        end
+      end
+
+      # The type the constraints imply, or nil: min/max with Integer bounds
+      # is int, with Float bounds float, with duration strings duration;
+      # min_items/max_items is a list (of int with item_min/item_max);
+      # schemes is a url.
+      #
+      # With a String default, only bounds decide, and only when the
+      # default reads as that type ("8080" for an int, "30s" for a
+      # duration).
+      def self.type_from_constraints(m, default = nil)
+        if default.is_a?(String)
+          t = type_from_constraints(m.slice(:min, :max))
+          ok = case t&.first
+          when "int" then Values::INT_RE.match?(default)
+          when "float" then Values::FLOAT_RE.match?(default)
+          when "duration" then !Duration.to_ns(default).nil?
+          end
+          return ok ? t : nil
+        end
+
+        if m.key?(:item_min) || m.key?(:item_max)
+          return ["list", "int", nil]
+        elsif m.key?(:min_items) || m.key?(:max_items)
+          return ["list", (m[:items] || "string").to_s, nil]
+        elsif m.key?(:schemes)
+          return ["url", nil, nil]
+        end
+
+        bounds = m.values_at(:min, :max).compact
+        return nil if bounds.empty?
+
+        if bounds.all?(Integer)
+          ["int", nil, nil]
+        elsif bounds.all?(Numeric)
+          ["float", nil, nil]
+        elsif bounds.all? { |b| b.is_a?(String) || (defined?(::ActiveSupport::Duration) && b.is_a?(::ActiveSupport::Duration)) } &&
+            bounds.all? { |b| Duration.to_ns(b) }
+          ["duration", nil, nil]
+        end
+      end
+
+      # Which types each constraint applies to (pattern, values, schema and
+      # item bounds are checked where they are read).
+      CONSTRAINT_TYPES = {
+        %i[min max] => ["int, float or duration", %w[int float duration]],
+        %i[min_length max_length] => ["string", %w[string]],
+        %i[schemes] => ["url", %w[url]],
+        %i[min_items max_items] => ["list", %w[list]]
+      }.freeze
+
+      # A constraint that cannot apply to the variable's type would be
+      # dropped from the contract and the boot check; reject it instead.
+      def self.check_constraint_types(m, type, env, attr, problems)
+        CONSTRAINT_TYPES.each do |keys, (label, types)|
+          given = keys.select { |k| m.key?(k) }
+          next if given.empty? || types.include?(type)
+
+          names = given.join("/")
+          problems << "#{env}: #{names} #{given.size > 1 ? "apply" : "applies"} to #{label} variables, but #{env} is " \
+            "a #{type} (from its coercion or default). Add type: to `describe :#{attr}` (for example type: :#{types.first}), " \
+            "or give a default of that type"
         end
       end
 
@@ -443,7 +533,7 @@ module Docuconf
         mounts = files.to_h { |f| [f.mount_dir, "file #{f.name}"] }
         overlays.each do |o|
           label = "overlay #{o.name}"
-          problems << "#{label}: name must be a DNS label (#{INPUT_NAME_RE.source})" unless INPUT_NAME_RE.match?(o.name)
+          problems << "#{label}: name must be a DNS label: lowercase letters, digits and '-', at most 42 characters, starting with a letter and ending with a letter or digit (e.g. serving-tls)" unless INPUT_NAME_RE.match?(o.name)
           if o.description && o.description.strip.length < 5
             problems << "#{label}: description must be at least 5 characters"
           end
@@ -478,7 +568,7 @@ module Docuconf
         mounts = {}
         files.each do |f|
           label = "file #{f.name}"
-          problems << "#{label}: name must be a DNS label (#{INPUT_NAME_RE.source})" unless INPUT_NAME_RE.match?(f.name)
+          problems << "#{label}: name must be a DNS label: lowercase letters, digits and '-', at most 42 characters, starting with a letter and ending with a letter or digit (e.g. serving-tls)" unless INPUT_NAME_RE.match?(f.name)
           problems << "#{label}: description must be at least 5 characters" if f.description.to_s.strip.length < 5
           if !ABS_PATH_RE.match?(f.path) || f.path.split("/").any? { |s| s == "." || s == ".." } ||
               f.path.include?("//") || f.path.end_with?("/")

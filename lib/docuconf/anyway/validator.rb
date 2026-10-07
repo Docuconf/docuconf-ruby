@@ -42,7 +42,7 @@ module Docuconf
             # Programmatic overrides (Config.new(port: 1)) win over loaded values.
             raw = @config.public_send(var.attr) if overridden?(var.attr)
             if raw.nil? || (raw == "" && var.type != "string")
-              add.call(:missing_required, "required, and not set") if required?(var)
+              add.call(:missing_required, missing_message(var)) if required?(var)
               next
             end
             value, failure = Values.from_typed(var, raw)
@@ -93,6 +93,23 @@ module Docuconf
       end
 
       private
+
+      # Says where the value can come from.
+      def missing_message(var)
+        return "required, and not set: set #{var.name} in the environment (a secret cannot come from a file)" if var.secret
+
+        where = "#{var.attr} in #{yaml_name}"
+        where += " or the overlay #{@klass.docuconf_declaration.overlays.map(&:name).join(", ")}" unless @klass.docuconf_declaration.overlays.empty?
+        "required, and not set: set #{var.name} in the environment, or #{where}"
+      end
+
+      def yaml_name
+        path = ::Anyway::Settings.default_config_path.call(@klass.config_name).to_s
+        root = ::Anyway::Settings.app_root.to_s
+        path.start_with?("#{root}/") ? path.delete_prefix("#{root}/") : path
+      rescue StandardError
+        "config/#{@klass.config_name}.yml"
+      end
 
       def required?(var)
         @klass.required_attributes.include?(var.attr)
