@@ -55,8 +55,8 @@ default the upcased `config_name`) + `_` + the upcased attribute, so `:port` in 
 | `list` | `{type: :string \| :integer, array: true}`, an Array default, or `min_items:`/`max_items:` (`item_min:`/`item_max:` for ints, `item_min_length:`/`item_max_length:` for strings) | `Array` |
 | `json` | `:json` (added by docuconf), or `type: :json`; `schema:` as for config files, `max_length:` | parsed JSON |
 
-- **Metadata**: `describe :attr, "description", group:, examples:, config_key:, deprecated:, type:`, plus any
-  constraint. `constrain :attr, ...` adds constraints alone: `min`, `max` (numbers, or durations in Go or
+- **Metadata**: `describe :attr, "description", details:, group:, examples:, config_key:, deprecated:, type:`,
+  plus any constraint. `details:` defaults to the YARD comment above the call (see the README). `constrain :attr, ...` adds constraints alone: `min`, `max` (numbers, or durations in Go or
   ISO 8601 syntax), `min_length`, `max_length`, `pattern`, `values`, `schemes`, `min_items`, `max_items`,
   `item_min`/`item_max` (each item of an int list; exported as `itemMin`/`itemMax`, and an item outside them is
   `out_of_range`), `item_min_length`/`item_max_length` (each item of a string list, after splitting, so a
@@ -233,7 +233,7 @@ config.plans       # => {"plans" => [{"id" => "basic", "cents" => 900}]}, parsed
 | `text_file name, pattern:, min_length:, max_length:` | `text` | `String` |
 | `binary_file name` | `binary` | the resolved path |
 
-Every macro takes `path:`, `description:`, `required:`, `path_env:`, `reload: :restart | :watch`, `max_size:`,
+Every macro takes `path:`, `description:`, `details:` (default: the YARD comment above the call), `required:`, `path_env:`, `reload: :restart | :watch`, `max_size:`,
 `group:`, `deprecated:` and `name:` (the contract name; default: the accessor with `_` as `-`). Absent optional
 inputs are `nil`. `password_var:` is a secret attribute of the same class (a Symbol) or a variable name.
 

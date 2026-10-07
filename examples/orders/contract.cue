@@ -51,6 +51,7 @@ contract.#Contract & {
 		REQUEST_TIMEOUT: {
 			type:        "duration"
 			description: "Time allowed to handle one request"
+			details:     "How long the server works on one request before it gives up.\n\nRaise it when clients upload large order batches. Keep it below the load\nbalancer's idle timeout, or the client sees a reset rather than a `504`."
 			configKey:   "orders.request_timeout"
 			encoding:    "iso8601"
 			min:         "1s"

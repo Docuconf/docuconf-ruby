@@ -235,6 +235,11 @@ RSpec.describe "contract export" do
         expect(Docuconf::Anyway::CLI.start(args, out: StringIO.new, err: err)).to eq 0
         expect(err.string).to include("is up to date")
 
+        # Another gem version alone is not drift.
+        File.write(out, File.read(GOLDEN).sub(/(generator: \{[^}]*version: +)"[^"]*"/m, '\1"9.9.9"'))
+        expect(File.read(out)).to include('"9.9.9"')
+        expect(Docuconf::Anyway::CLI.start(args, out: StringIO.new, err: StringIO.new)).to eq 0
+
         File.write(out, File.read(GOLDEN).sub("8080", "8081"))
         expect(Docuconf::Anyway::CLI.start(args, out: StringIO.new, err: StringIO.new)).to eq 1
       ensure

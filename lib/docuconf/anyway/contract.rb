@@ -265,8 +265,11 @@ module Docuconf
           Schema.problems(constraints[:schema]).each { |p| problems << "#{label}: schema #{p}" }
         end
 
+        # details are docs only (SPEC §4.2): checked, never read at runtime.
+        details = h["details"]&.to_s
+        Docs.check(label, details, problems)
         var = VarDecl.new(
-          attr: label.to_sym, name: label, type: type, description: h["description"].to_s,
+          attr: label.to_sym, name: label, type: type, description: h["description"].to_s, details: details,
           secret: h["secret"] == true, required: h["required"] == true, default: h["default"],
           constraints: constraints, items: items, regexp: regexp, encoding: encoding,
           separator: h["separator"]&.to_s

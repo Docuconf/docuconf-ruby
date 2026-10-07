@@ -76,6 +76,29 @@ from the constraints: `min: "1s"` makes `request_timeout` a duration. A constrai
 type is an error when the class loads, never silently dropped. In Rails, `bin/rails g docuconf:config orders`
 adds the `include` and a `describe` stub per attribute to an existing class.
 
+### Descriptions and details
+
+`describe`'s text is the contract's `description`: one line, at least 5 characters. Longer documentation, why
+the setting exists and when to change it, goes in `details` (CommonMark, at most 4000 characters). Write it as
+the YARD comment directly above `describe` (or above a file macro such as `tls_file`), or pass `details:`:
+
+```ruby
+  # How long the server works on one request before it gives up.
+  #
+  # Raise it for clients that upload large batches. Keep it below the load
+  # balancer's idle timeout, or the client sees a reset rather than a +504+.
+  describe :request_timeout, "Time allowed to handle one request", min: "1s", max: "5m"
+
+  describe :worker_count, "Background workers", min: 1, max: 64, details: "One per CPU core is a good start."
+```
+
+YARD and RDoc markup becomes CommonMark: `{Klass#method}` links and `+code+` become code spans, `= Heading`
+a heading, `@example` a fenced code block, `@note` and `@see` sentences; other tags (`@param`, `@return`...) are
+dropped. A comment separated from `describe` by a blank line is not read. Export fails when a description is
+missing or too short, or when details are blank or longer than 4000 characters. Details are for docs only and
+never read at runtime. `docuconf docs` in the [docuconf CLI](https://github.com/docuconf/docuconf-go) generates
+`CONFIG.md` and `CONFIG.agents.md` from the exported contract.
+
 ## Run
 
 Load the config once at boot:

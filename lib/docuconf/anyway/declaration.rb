@@ -17,7 +17,7 @@ module Docuconf
 
     # Options accepted by `describe` and `constrain`.
     VAR_OPTIONS = %i[
-      type group examples config_key deprecated secret
+      type group examples config_key deprecated secret details
       min max min_length max_length pattern values schemes items min_items max_items item_min item_max
       item_min_length item_max_length schema json_schema
     ].freeze
@@ -25,7 +25,7 @@ module Docuconf
     # One exported variable: an anyway_config attribute and its docuconf
     # metadata.
     class VarDecl
-      attr_reader :attr, :name, :type, :description, :secret, :required, :default, :constraints,
+      attr_reader :attr, :name, :type, :description, :details, :secret, :required, :default, :constraints,
         :group, :examples, :config_key, :deprecated, :items, :regexp, :coercion, :lenient_duration
 
       def initialize(**kw)
@@ -50,6 +50,7 @@ module Docuconf
       # The variable as contract data (SPEC §4.2), in a stable field order.
       def to_contract
         h = {"type" => type, "description" => description}
+        h["details"] = details if details
         h["required"] = true if required
         h["secret"] = true if secret
         h["group"] = group if group
@@ -99,7 +100,7 @@ module Docuconf
 
     # One file input (SPEC §4.6).
     class FileDecl
-      attr_reader :accessor, :name, :type, :description, :required, :secret, :path, :path_env, :reload,
+      attr_reader :accessor, :name, :type, :description, :details, :required, :secret, :path, :path_env, :reload,
         :max_size, :group, :deprecated, :options
 
       def initialize(**kw)
@@ -114,6 +115,7 @@ module Docuconf
         h = {"type" => type}
         h["format"] = options[:format] if %w[config keystore].include?(type)
         h["description"] = description
+        h["details"] = details if details
         h["required"] = true if required
         h["secret"] = true if secret
         h["group"] = group if group
@@ -224,6 +226,8 @@ module Docuconf
             next
           end
           problems << "#{env}: description must be at least 5 characters" if desc.to_s.strip.length < 5
+          details = Docs.details(m[:details], m[:doc_site])
+          Docs.check(env, details, problems)
           problems << "#{env}: is not a valid environment variable name: uppercase letters, digits and '_', starting with a letter (set env_prefix or rename the attribute)" unless ENV_NAME_RE.match?(env)
           if FEATURE_FLAG_RE.match?(env)
             warnings << "#{env} looks like a feature flag; flags that change without a rollout belong in a flag " \
@@ -302,7 +306,8 @@ module Docuconf
           deprecated = normalize_deprecated(m[:deprecated])
 
           var = VarDecl.new(
-            attr: attr, name: env, type: type, description: desc.to_s, secret: secret, required: required,
+            attr: attr, name: env, type: type, description: desc.to_s, details: details, secret: secret,
+            required: required,
             default: default, constraints: constraints, group: m[:group]&.to_s,
             examples: m[:examples]&.map(&:to_s), config_key: m[:config_key]&.to_s || "#{klass.config_name}.#{attr}",
             deprecated: deprecated, items: items, regexp: regexp, coercion: coercion_for(type, items),
@@ -624,6 +629,7 @@ module Docuconf
           label = "file #{f.name}"
           problems << "#{label}: name must be a DNS label: lowercase letters, digits and '-', at most 42 characters, starting with a letter and ending with a letter or digit (e.g. serving-tls)" unless INPUT_NAME_RE.match?(f.name)
           problems << "#{label}: description must be at least 5 characters" if f.description.to_s.strip.length < 5
+          Docs.check(label, f.details, problems)
           if !ABS_PATH_RE.match?(f.path) || f.path.split("/").any? { |s| s == "." || s == ".." } ||
               f.path.include?("//") || f.path.end_with?("/")
             problems << "#{label}: path #{f.path.inspect} must be absolute and normalised"

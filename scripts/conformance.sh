@@ -20,4 +20,4 @@ export DOCUCONF_REQUIRE_VET=1
 
 cd "$(dirname "$0")/.."
 bundle install --quiet
-bundle exec rspec spec/conformance_spec.rb spec/export_spec.rb spec/overlays_spec.rb
+bundle exec rspec spec/conformance_spec.rb spec/export_spec.rb spec/overlays_spec.rb spec/docs_spec.rb
