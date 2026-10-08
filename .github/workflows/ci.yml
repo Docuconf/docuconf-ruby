@@ -139,5 +139,18 @@ jobs:
           cp contract.cue "$vet/orders/"
           cd "$vet" && cue vet -c ./orders
 
+      # CONFIG.md, CONFIG.agents.md and docs.json are generated from the
+      # contract by docuconf docs, built from the docuconf-go checkout; they
+      # must match what it writes today. These are the README's commands.
+      - name: Generated docs are up to date
+        run: |
+          (cd "$GITHUB_WORKSPACE/docuconf-go/cmd/docuconf" && go build -o "$RUNNER_TEMP/docuconf" .)
+          # "Contract is up to date" re-exports contract.cue in place; check
+          # the docs against the committed one (and its generator.version).
+          git checkout -- contract.cue
+          "$RUNNER_TEMP/docuconf" docs contract.cue --check CONFIG.md
+          "$RUNNER_TEMP/docuconf" docs contract.cue --format agents --check CONFIG.agents.md
+          "$RUNNER_TEMP/docuconf" docs contract.cue --format model --check docs.json
+
       - name: Smoke test
         run: ./smoke.sh

@@ -2,6 +2,8 @@
 
 require_relative "lib/docuconf/anyway/version"
 
+repo = "https://github.com/docuconf/docuconf-ruby"
+
 Gem::Specification.new do |spec|
   spec.name = "docuconf-anyway"
   spec.version = Docuconf::Anyway::VERSION
@@ -13,15 +15,16 @@ Gem::Specification.new do |spec|
     at boot with stable error codes, and exports the declaration as a docuconf CUE contract that the
     Kubernetes platform validates before deploying.
   TXT
-  spec.homepage = "https://github.com/docuconf/docuconf-ruby"
+  spec.homepage = "https://docuconf.dev/languages/ruby/"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.2"
 
   spec.metadata = {
     "homepage_uri" => spec.homepage,
-    "source_code_uri" => spec.homepage,
-    "changelog_uri" => "#{spec.homepage}/releases",
-    "bug_tracker_uri" => "#{spec.homepage}/issues",
+    "documentation_uri" => "https://docuconf.dev/languages/ruby/",
+    "source_code_uri" => repo,
+    "changelog_uri" => "#{repo}/releases",
+    "bug_tracker_uri" => "#{repo}/issues",
     "rubygems_mfa_required" => "true",
     # Links the gem to this repository on GitHub Packages (rubygems.pkg.github.com).
     "github_repo" => "ssh://github.com/Docuconf/docuconf-ruby"
