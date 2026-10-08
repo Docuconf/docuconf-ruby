@@ -3,6 +3,8 @@
 The Ruby SDK for [docuconf](https://github.com/docuconf): typed configuration contracts between an
 application and the Kubernetes platform that runs it.
 
+Documentation: [docuconf.dev](https://docuconf.dev) · [Ruby guide](https://docuconf.dev/languages/ruby/)
+
 It extends [anyway_config](https://github.com/palkan/anyway_config) rather than replacing it. You keep your
 `Anyway::Config` classes (`attr_config`, `required`, `config_name`, `env_prefix`, YAML, credentials), and add
 one `describe` line per attribute. docuconf then:
