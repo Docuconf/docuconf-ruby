@@ -16,7 +16,7 @@ class OrdersConfig < Anyway::Config
   describe :port, "HTTP listen port", min: 1, max: 65_535
   describe :log_level, "Minimum log level", values: %w[debug info warn error]
   describe :database_url, "Postgres connection string for orders", type: :url, schemes: %w[postgres],
-    secret: true # never printed, and the contract marks it secret
+    max_length: 2048, secret: true # never printed, and the contract marks it secret
   describe :allowed_origins, "CORS origins allowed to call the API", min_items: 1
 
   # How long the server works on one request before it gives up.
