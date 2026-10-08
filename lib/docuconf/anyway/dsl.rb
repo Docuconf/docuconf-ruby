@@ -27,10 +27,13 @@ module Docuconf
       #   describe :port, "HTTP listen port", min: 1, max: 65535, group: "http"
       #   describe :database_url, "Primary database", type: :url, schemes: %w[postgres]
       #
-      # Options: type, group, examples, config_key, deprecated, secret, and
-      # every constraint `constrain` takes.
+      # Options: type, group, examples, config_key, deprecated, secret,
+      # details, and every constraint `constrain` takes.
+      #
+      # `details` (CommonMark, for generated docs only) defaults to the YARD
+      # comment directly above the call (see Docs).
       def describe(attr, description, **options)
-        docuconf_merge_meta(attr, options.merge(description: description))
+        docuconf_merge_meta(attr, options.merge(description: description, doc_site: Docs.call_site))
       end
 
       # anyway_config's `required`, also remembered unfiltered: anyway_config
@@ -196,14 +199,14 @@ module Docuconf
       private
 
       def docuconf_merge_meta(attr, options)
-        unknown = options.keys - VAR_OPTIONS - [:description]
+        unknown = options.keys - VAR_OPTIONS - %i[description doc_site]
         raise ArgumentError, "unknown docuconf option(s) for #{attr}: #{unknown.join(", ")}" unless unknown.empty?
 
         @docuconf_declaration = nil
         (docuconf_var_meta[attr.to_sym] ||= {}).merge!(options)
       end
 
-      FILE_COMMON = %i[path description required path_env reload max_size group deprecated secret name].freeze
+      FILE_COMMON = %i[path description details required path_env reload max_size group deprecated secret name].freeze
       private_constant :FILE_COMMON
 
       def docuconf_add_file(accessor, type, common, **options)
@@ -216,6 +219,7 @@ module Docuconf
           raise ArgumentError, "file #{accessor}: name clashes with attr_config :#{accessor}"
         end
 
+        site = Docs.call_site
         problems = []
         if type == "config"
           options[:schema] = Declaration.schema_from(
@@ -237,6 +241,7 @@ module Docuconf
           name: (common[:name] || accessor.to_s.tr("_", "-")).to_s,
           type: type,
           description: common[:description].to_s,
+          details: Docs.details(common[:details], site),
           required: common[:required] == true,
           secret: common[:secret] == true,
           path: common[:path].to_s,

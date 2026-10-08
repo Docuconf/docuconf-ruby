@@ -15,9 +15,14 @@ class OrdersConfig < Anyway::Config
 
   describe :port, "HTTP listen port", min: 1, max: 65_535
   describe :log_level, "Minimum log level", values: %w[debug info warn error]
-  # secret: the value is never printed, and the contract marks it secret.
-  describe :database_url, "Postgres connection string for orders", type: :url, schemes: %w[postgres], secret: true
+  describe :database_url, "Postgres connection string for orders", type: :url, schemes: %w[postgres],
+    secret: true # never printed, and the contract marks it secret
   describe :allowed_origins, "CORS origins allowed to call the API", min_items: 1
+
+  # How long the server works on one request before it gives up.
+  #
+  # Raise it when clients upload large order batches. Keep it below the load
+  # balancer's idle timeout, or the client sees a reset rather than a +504+.
   describe :request_timeout, "Time allowed to handle one request", min: "1s", max: "5m"
   describe :worker_count, "Background workers processing orders", min: 1, max: 64
 end

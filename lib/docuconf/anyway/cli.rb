@@ -109,7 +109,7 @@ module Docuconf
         text = Docuconf::Anyway.export(**options, warn: ->(m) { @err.puts "docuconf: #{m}" })
         if o[:check]
           current = File.exist?(o[:out]) ? File.read(o[:out]) : nil
-          if current == text
+          if current && without_generator_version(current) == without_generator_version(text)
             @err.puts "docuconf: #{o[:out]} is up to date"
             return 0
           end
@@ -124,6 +124,12 @@ module Docuconf
           @out.print text
         end
         0
+      end
+
+      # The contract without metadata.generator.version, which --check
+      # ignores so that upgrading the gem alone does not fail CI.
+      def without_generator_version(text)
+        text.sub(/(\bgenerator:\s*\{[^}]*?\bversion:\s*)"[^"]*"/m, '\1""')
       end
 
       def check(argv)
