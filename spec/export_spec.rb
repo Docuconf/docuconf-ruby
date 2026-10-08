@@ -8,6 +8,12 @@ RSpec.describe "contract export" do
     Docuconf::Anyway.export(name: "sample-gateway", classes: [Fixtures::GatewayConfig], root: FIXTURES, **opts)
   end
 
+  # metadata.generator.version is the gem version, which every release PR bumps, so comparisons with committed
+  # exports ignore its value.
+  def without_generator_version(cue)
+    cue.sub(/(generator:\s*\{[^{}]*?\bversion:\s*)"[^"]*"/m, '\1"<generator-version>"')
+  end
+
   def anon(name, &block)
     Class.new(Anyway::Config) do
       include Docuconf::Anyway
@@ -21,7 +27,15 @@ RSpec.describe "contract export" do
     if ENV["UPDATE_GOLDEN"] == "1"
       File.write(GOLDEN, text)
     end
-    expect(text).to eq File.read(GOLDEN)
+    expect(without_generator_version(text)).to eq without_generator_version(File.read(GOLDEN))
+  end
+
+  it "ignores only the generator version when comparing with the golden file" do
+    text = export_gateway
+    bumped = text.sub(/(\bversion:\s*)"[^"]*"/, '\1"99.0.0"')
+    expect(bumped).not_to eq text
+    expect(without_generator_version(bumped)).to eq without_generator_version(text)
+    expect(without_generator_version(text.sub("HTTP listen port", "port"))).not_to eq without_generator_version(text)
   end
 
   it "is deterministic, with vars and files sorted by name" do
@@ -202,7 +216,7 @@ RSpec.describe "contract export" do
             File.expand_path("fixtures/gateway_config.rb", __dir__)], out: StringIO.new, err: err
         )
         expect(code).to eq 0
-        expect(File.read(out)).to eq File.read(GOLDEN)
+        expect(without_generator_version(File.read(out))).to eq without_generator_version(File.read(GOLDEN))
       ensure
         Docuconf::Anyway.export_mode = false
       end
