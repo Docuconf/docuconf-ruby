@@ -110,7 +110,7 @@ module Docuconf
 
             return parse_json_items(var, parsed)
           else
-            raw.split(/\s*#{Regexp.escape(var.separator)}\s*/)
+            raw.split(/\s*#{Regexp.escape(var.separator)}\s*/, -1)
           end
         return [items, nil] unless var.items == "int"
 
