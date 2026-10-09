@@ -123,7 +123,11 @@ jobs:
         run: go install cuelang.org/go/cmd/cue@v0.17.1
 
       - name: Build
-        run: bundle exec ruby -c config.ru server.rb config/orders_config.rb
+        run: bundle exec ruby -c config.ru server.rb config/orders_config.rb webhook.rb
+
+      # The webhook key set: a rotation, and the key sets that fail at boot.
+      - name: Test
+        run: bundle exec ruby test/webhook_test.rb
 
       # Ignores metadata.generator.version, which release PRs bump.
       - name: Contract is up to date
