@@ -53,6 +53,7 @@ default the upcased `config_name`) + `_` + the upcased attribute, so `:port` in 
 | `url` | `:uri`, `describe x, "...", type: :url`, or `schemes:`; `max_length:` bounds it | `URI` / `String` |
 | `enum` | `describe x, "...", values: [...]` | `String` |
 | `list` | `{type: :string \| :integer, array: true}`, an Array default, or `min_items:`/`max_items:` (`item_min:`/`item_max:` for ints, `item_min_length:`/`item_max_length:` for strings) | `Array` |
+| `keySet` | `describe x, "...", type: :key_set`, with `min_keys:` (default 1), `max_keys:` (default 2), `key_min_length:`, `key_max_length:` | `Docuconf::Anyway::KeySet` |
 | `json` | `:json` (added by docuconf), or `type: :json`; `schema:` as for config files, `max_length:` | parsed JSON |
 
 - **Metadata**: `describe :attr, "description", details:, group:, examples:, config_key:, deprecated:, type:`,
@@ -60,7 +61,25 @@ default the upcased `config_name`) + `_` + the upcased attribute, so `:port` in 
   ISO 8601 syntax), `min_length`, `max_length`, `pattern`, `values`, `schemes`, `min_items`, `max_items`,
   `item_min`/`item_max` (each item of an int list; exported as `itemMin`/`itemMax`, and an item outside them is
   `out_of_range`), `item_min_length`/`item_max_length` (each item of a string list, after splitting, so a
-  separator is never counted; exported as `itemMinLength`/`itemMaxLength`), `schema`/`json_schema` (json only).
+  separator is never counted; exported as `itemMinLength`/`itemMaxLength`), `schema`/`json_schema` (json only),
+  `separator` (a csv list or key set; default `,`), and `min_keys`/`max_keys`/`key_min_length`/`key_max_length`
+  (key sets only).
+- **Key sets** (`type: :key_set`, SPEC §4.3): a set of secret keys that are all valid at once, so one can be
+  rotated without an outage: webhook signatures, inbound API keys, HMAC-signed tokens. A key set is always
+  secret (no default, no examples), travels as a csv list (`old,new` during a rotation; keys are never
+  trimmed), and loads as a `Docuconf::Anyway::KeySet`: `#keys` in the platform's order, a constant-time
+  `#contains?(candidate)`, and `#verify { |key| ... }`, which runs your check (an HMAC comparison) against
+  every key without stopping at the first match. It prints as `[FILTERED]` in `#inspect`, `#to_s`, `pp` and
+  JSON. Fewer than `min_keys` or more than `max_keys` keys is `too_few_items`/`too_many_items`; a key outside
+  `key_min_length`..`key_max_length`, and an empty key whatever the bounds (a stray separator), is
+  `out_of_range`. Errors give positions and lengths, never a key. Generated docs print the rotation steps.
+- **Deprecated** (SPEC §4.2): `deprecated: "Use PORT instead"` or `deprecated: {message:, replaced_by:}`, on a
+  variable or a file input. The message must not be blank and is at most 500 characters, and a required input
+  cannot be deprecated (both a `DeclarationError`). At boot, a deprecated input that is set still loads and is
+  still checked; docuconf warns once, naming the input and the message, never the value.
+- **configKey**: by default anyway_config's own key path, `<config_name>.<attr>`, which overlays use.
+  `config_key: "..."` sets another; `config_key: false` leaves it out of the contract, so the variable can only
+  come from the environment.
 - **Length limits**: `min_length` applies to strings; `max_length` to strings, urls and json values. Lengths
   count characters (Unicode code points, Ruby's `String#length`), never bytes: `"日本"` is 2 and `"ZÜ01"` fits
   `item_max_length: 4`. A json value is measured as the app receives it, whitespace included, before it is
@@ -99,17 +118,25 @@ constraints, clashing mounts) raise `Docuconf::Anyway::DeclarationError` on firs
 
 | Type | Encoding in the contract | What the platform renders |
 |---|---|---|
-| `list` | `csv`, separator `,` | `a,b`, which anyway_config's array coercion splits |
+| `list`, `keySet` | `csv`, separator `,` (or `separator:`) | `a,b` |
 | `duration` | `iso8601` | `PT90S`, which `ActiveSupport::Duration.parse` (or docuconf's parser) reads |
 
 Platform authors still write `"90s"` and `["a", "b"]`; the renderer converts. At boot a declared duration
 also accepts Go syntax (`REQUEST_TIMEOUT=90s` in a `.env` file), as its defaults do.
 
-Parsing follows SPEC §5, with a strict pre-check before anyway_config's coercion: integers are plain base-10
-within 64 bits (`"80a"` is an error, not `80`), floats are finite, booleans are `true`/`false` (anyway's
-`yes`/`no`/`1`/`0` also work; anything else is an error rather than `false`), an empty string is *unset* for
-every type except `string`, and values are never trimmed. anyway_config's array coercion does trim spaces
-around commas in list items.
+Parsing follows SPEC §5 exactly, whatever anyway_config would accept: docuconf parses each environment value
+first and hands anyway_config the typed result, so its coercion never sees the raw string. Anything outside
+these rules is `invalid_type`:
+
+- `bool`: `true` or `false` in any case (`TRUE`, `False`); never `1`, `0`, `t`, `yes`, `on`.
+- `int`: decimal digits with an optional sign, `^[+-]?[0-9]+$`; leading zeros are decimal (`007` is 7, `010`
+  is 10, never octal, even with an `:integer!` coercion). `0x10`, `1_000`, `1e3` and `5.0` fail; beyond 64 bits
+  is `out_of_range`.
+- `float`: `^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$`, finite: no `inf`, `NaN`, `.5`, `5.` or hex.
+- `duration`: the grammar of its encoding: Go's `time.ParseDuration` (`1m30s`, `1.5h`, `-5s`), ISO 8601
+  (`PT1,5S`, `P1DT2H`; no weeks, months or years), seconds (`90`, `1.5`) or a TimeSpan (`00:01:30`).
+- Nothing is trimmed, csv items included: `a, b` is `a` and ` b`, and `a,,b` has an empty middle item.
+- An empty string is *unset* for every type except `string`.
 
 
 ## YAML, credentials and precedence
@@ -279,13 +306,26 @@ values = contract.load(ENV) # => {"PORT" => 8080, "TIMEOUT" => 30.seconds, "ORIG
 ```
 
 `Docuconf::Anyway.load_contract(json, env: ENV)` does both steps. It reads every wire encoding of SPEC §5: `csv`
-lists with any `separator`, `json` lists and `indexed` lists (`NAME__0`, `NAME__1`, ..., numbered from 0 with no gap; a gap is `invalid_type`); `go`, `iso8601`,
+lists and key sets with any `separator`, `json` lists and `indexed` lists (`NAME__0`, `NAME__1`, ..., numbered from 0 with no gap; a gap is `invalid_type`); `go`, `iso8601`,
 `seconds` and `timespan` (`[d.]hh:mm:ss[.fff]`) durations. Values go through the same parsing and checks as the
-declaration path, profile defaults apply for the selected profile, and every problem is raised together as a
+declaration path, and every problem is raised together as a
 `ValidationError` (also written to the termination log; pass `termination_log: false` to skip that). A
 malformed contract raises `DeclarationError`. Values are keyed by variable name: absent optional variables are
-`nil`, and durations are `ActiveSupport::Duration` (`Float` seconds without ActiveSupport). File inputs and overlays in
-the contract are not checked in this mode.
+`nil`, durations are `ActiveSupport::Duration` (`Float` seconds without ActiveSupport), and key sets are
+`KeySet`s.
+
+The contract's `files`, `profiles` and `overlays` apply too, read from under `DOCUCONF_FILE_ROOT` when it is set:
+
+- **File inputs** are checked as at boot (`config` in `json`, `yaml` or `toml`, `tls`, `caBundle`, a PKCS#12
+  `keystore` opened with its `passwordVar`, or the empty password when that is unset, `text` and `binary`), and
+  returned by input name: a config file's data, a text file's text, a `TLSMaterial`, `CABundle`,
+  `OpenSSL::PKCS12` or a binary file's path, and `nil` for an absent optional file.
+- **Layers** apply in the order of SPEC §4.7: the variable's default, then the selected profile's default (the
+  selector's value when the environment sets it, else `profiles.default`), then an overlay, then the
+  environment. Each overlay value is read at its `configKey`, split on `keySeparator`, converted from its native
+  type to the wire string and checked exactly like an env value; a missing overlay is fine, and one that does not
+  parse or does not hold an object is `file_malformed` for the overlay.
+- **Deprecated** inputs that are set log a warning, as at boot.
 
 
 ## Error codes

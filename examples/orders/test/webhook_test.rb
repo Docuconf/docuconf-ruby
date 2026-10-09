@@ -26,6 +26,7 @@ class WebhookTest < Minitest::Test
       "after" => [NEW, {OLD => false, NEW => true}]
     }.each do |step, (value, accepts)|
       ks = keys(value)
+      assert_kind_of Docuconf::Anyway::KeySet, ks
       accepts.each { |key, want| assert_equal want, Webhook.verify(ks, BODY, sign(key)), "#{step}: key #{key[0]}" }
     end
   end
@@ -37,6 +38,14 @@ class WebhookTest < Minitest::Test
     refute Webhook.verify(ks, BODY, sign("x" * 32))
     refute Webhook.verify(ks, "#{BODY} ", sign(OLD))
     refute Webhook.verify(nil, BODY, sign(OLD))
+  end
+
+  def test_keys_never_show
+    ks = keys("#{OLD},#{NEW}")
+    [ks.to_s, ks.inspect, OrdersConfig.from_env(BASE.merge("WEBHOOK_KEYS" => OLD)).inspect].each do |shown|
+      refute_includes shown, OLD
+    end
+    assert ks.contains?(NEW)
   end
 
   def test_optional

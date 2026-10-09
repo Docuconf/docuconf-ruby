@@ -90,6 +90,8 @@ module Docuconf
       def values_for(decl, overlay, data, failures = {})
         out = {}
         decl.vars.each do |var|
+          next if var.config_key.nil?
+
           found, value = dig(data, var.config_key.split(overlay.key_separator))
           next unless found
 
@@ -106,6 +108,79 @@ module Docuconf
           out[var.attr.to_s] = value
         end
         out
+      end
+
+      # Reads an overlay in any format (json, yaml or toml), for
+      # contract-first mode. Returns [Hash, nil], [nil, nil] for a missing
+      # file, or [nil, Failure].
+      def parse_file(path, format)
+        content = File.binread(path)
+        text = content.dup.force_encoding(Encoding::UTF_8)
+        unless text.valid_encoding?
+          return [nil, Failure.new(:file_malformed, "#{path} is not valid UTF-8")]
+        end
+
+        data = Files.parse_config(format, text.delete_prefix(Files::BOM))
+        return [data, nil] if data.is_a?(Hash)
+
+        [nil, Failure.new(:file_malformed, "#{path} does not hold an object at its top level")]
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        [nil, nil]
+      rescue Errno::EACCES
+        [nil, Failure.new(:file_unreadable, "#{path}: #{Files::UNREADABLE_HINT}")]
+      rescue SystemCallError, IOError => e
+        [nil, Failure.new(:file_unreadable, "#{path}: #{e.message}")]
+      rescue JSON::ParserError, Psych::Exception, Files::ConfigParseError => e
+        [nil, Failure.new(:file_malformed, "#{path} is not valid #{format}: #{e.message.lines.first&.strip}")]
+      end
+
+      # Converts a native overlay value to the wire string it stands for
+      # (SPEC §4.7), to be parsed like an environment value: a string as it
+      # is, a boolean as true or false, an integral number as an integer
+      # (50.0 is 50), any other number in shortest round-trip decimal, a
+      # list item by item, and a json variable's value as compact JSON.
+      # Returns [{raw:} or {items:}, nil] or [nil, message].
+      def wire_value(var, value)
+        case var.type
+        when "json"
+          [{raw: JSON.generate(value)}, nil]
+        when "list", "keySet"
+          return [nil, "is #{kind(value)}, not a list"] unless value.is_a?(Array)
+
+          items = []
+          value.each_with_index do |x, i|
+            t = scalar_text(x)
+            return [nil, "item #{i} is #{kind(x)}, not a scalar"] if t.nil?
+
+            items << t
+          end
+          [{items: items}, nil]
+        else
+          t = scalar_text(value)
+          t.nil? ? [nil, "is #{kind(value)}, not a scalar"] : [{raw: t}, nil]
+        end
+      end
+
+      def scalar_text(x)
+        case x
+        when String then x
+        when true, false then x.to_s
+        when Integer then x.to_s
+        when Float
+          return x.to_s unless x.finite?
+          return x.to_i.to_s if x == x.truncate && x.abs < 2**63
+
+          x.to_s.sub(/\.0(?=e)/, "")
+        end
+      end
+
+      def kind(x)
+        case x
+        when Hash then "an object"
+        when Array then "a list"
+        when nil then "null"
+        else "a #{x.class.name.downcase}"
+        end
       end
 
       def dig(data, parts)
@@ -162,6 +237,7 @@ module Docuconf
           trace!(ID, path: o.path) { values }
           ::Anyway::Utils.deep_merge!(out, values)
         end
+        docuconf_config.instance_variable_set(:@docuconf_overlay_attrs, out.keys)
         out
       end
 

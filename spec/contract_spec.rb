@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "pp"
+
 RSpec.describe "contract-first mode" do
   def contract(vars, **extra)
     {
@@ -39,9 +41,12 @@ RSpec.describe "contract-first mode" do
       "D_GO" => 90_000_000_000, "D_ISO8601" => 90_500_000_000, "D_SECONDS" => 90_500_000_000,
       "D_TIMESPAN" => 86_490_500_000_000
     )
-    expect(codes_of(vars, {"D_TIMESPAN" => "00:60:00", "D_GO" => "-5s", "D_SECONDS" => "1e3"})).to contain_exactly(
+    expect(codes_of(vars, {"D_TIMESPAN" => "00:60:00", "D_GO" => "5S", "D_SECONDS" => "1e3"})).to contain_exactly(
       ["D_TIMESPAN", :invalid_type], ["D_GO", :invalid_type], ["D_SECONDS", :invalid_type]
     )
+    # Only the go encoding has a sign (SPEC §5).
+    expect(Docuconf::Anyway::Duration.to_ns(load(vars, {"D_GO" => "-5s"})["D_GO"])).to eq(-5_000_000_000)
+    expect(codes_of(vars, {"D_ISO8601" => "-PT5S"})).to eq [["D_ISO8601", :invalid_type]]
   end
 
   it "reads every list encoding and checks item bounds" do

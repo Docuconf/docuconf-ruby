@@ -18,7 +18,7 @@ gives an app:
 | `ALLOWED_ORIGINS` | list of strings, comma-separated | at least 1 item; default `http://localhost:3000` |
 | `REQUEST_TIMEOUT` | duration, ISO 8601 (`PT30S`); `30s` also works locally | `1s`–`5m`, default `30s` |
 | `WORKER_COUNT` | int | 1–64, default `4` |
-| `WEBHOOK_KEYS` | list of strings, comma-separated | secret, optional; 1–2 keys of 32–256 characters each |
+| `WEBHOOK_KEYS` | key set, comma-separated | secret, optional; 1–2 keys of 32–256 characters each |
 
 The names have no prefix because the class sets `env_prefix ""`. Lists and durations use the encodings
 anyway_config parses, and the contract says so, so the platform renders `REQUEST_TIMEOUT: "90s"` as `PT90S`.
@@ -58,8 +58,9 @@ $ echo $?
 
 ## Rotate a key
 
-`WEBHOOK_KEYS` is a key set: `POST /webhooks/payments` accepts a body whose `X-Signature` header is the hex
-HMAC-SHA256 of the body under any key in the list ([`webhook.rb`](webhook.rb)). A variable is read once, at
+`WEBHOOK_KEYS` is a key set (`type: :key_set`): `POST /webhooks/payments` accepts a body whose `X-Signature`
+header is the hex HMAC-SHA256 of the body under any key in the set, checked with `KeySet#verify`
+([`webhook.rb`](webhook.rb)). A variable is read once, at
 start, so a new key reaches the service only when the pods restart; with two keys valid at once, no webhook is
 turned away while that happens:
 
@@ -74,14 +75,15 @@ WEBHOOK_KEYS:
   secretKeyRef: {name: orders-webhooks, key: keys}
 ```
 
-The contract allows 1 or 2 keys of 32 to 256 characters each, so a trailing comma or a truncated key stops the
-service at boot instead of locking out the sender, without printing a key:
+The generated docs ([`CONFIG.md`](CONFIG.md)) print these steps for every key set. The contract allows 1 or 2
+keys of 32 to 256 characters each, so a trailing comma or a truncated key stops the service at boot instead of
+locking out the sender, without printing a key:
 
 ```console
 $ DATABASE_URL=postgres://orders:pw@localhost:5432/orders \
     WEBHOOK_KEYS=old-webhook-key-0123456789abcdef0123, bundle exec ruby server.rb
 docuconf: 1 configuration problem:
-  - WEBHOOK_KEYS [out_of_range]: item 1 is 0 characters, below item_min_length 32
+  - WEBHOOK_KEYS [out_of_range]: key 1 is empty (a stray separator?)
 ```
 
 [`test/webhook_test.rb`](test/webhook_test.rb) walks through a rotation (`bundle exec ruby test/webhook_test.rb`),

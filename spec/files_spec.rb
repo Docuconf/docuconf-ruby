@@ -171,7 +171,9 @@ RSpec.describe "file inputs at boot" do
       in_gateway do |root|
         write_file(root, "etc/gateway/tls/tls.crt", "not a certificate")
         write_file(root, "etc/gateway/tls/tls.key", "-----BEGIN PRIVATE KEY-----\nc2VjcmV0\n-----END PRIVATE KEY-----\n")
-        expect_violations(["serving-tls", :certificate_invalid], ["serving-tls", :certificate_invalid]) do |e|
+        # No PEM certificate at all is file_malformed; a PEM key that does not
+        # parse is certificate_invalid (SPEC §11.2 item 5).
+        expect_violations(["serving-tls", :file_malformed], ["serving-tls", :certificate_invalid]) do |e|
           expect(e.message).not_to include("c2VjcmV0")
         end
       end

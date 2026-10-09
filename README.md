@@ -78,6 +78,35 @@ from the constraints: `min: "1s"` makes `request_timeout` a duration. A constrai
 type is an error when the class loads, never silently dropped. In Rails, `bin/rails g docuconf:config orders`
 adds the `include` and a `describe` stub per attribute to an existing class.
 
+Values are parsed exactly as the spec says (SPEC §5), whatever anyway_config would accept on its own: a bool is
+`true` or `false` in any case (never `1`, `yes` or `t`); an int is decimal digits with an optional sign (`007`
+is 7, never octal; `0x10`, `1_000` and `1e3` fail); a float is decimal (no `inf`, `.5` or `5.`); a duration
+follows its encoding's grammar; and nothing is trimmed, csv items included (`a, b` is `a` and ` b`). Anything
+else is `invalid_type`. The [reference](docs/reference.md#wire-encodings) has every rule.
+
+### Key sets
+
+A key set holds secret keys that are all valid at once, so one can be rotated without an outage: webhook
+signatures, inbound API keys, HMAC-signed tokens. It is always secret, and travels as `old,new` during a
+rotation:
+
+```ruby
+  attr_config :webhook_keys
+  describe :webhook_keys, "Keys that verify webhook signatures", type: :key_set,
+    key_min_length: 32, key_max_length: 256 # 1 to 2 keys by default: min_keys:, max_keys:
+
+# In the webhook handler: tries every key, without stopping at the first match.
+ok = CONFIG.webhook_keys.verify do |key|
+  OpenSSL.secure_compare(OpenSSL::HMAC.hexdigest("SHA256", key, body), signature)
+end
+CONFIG.webhook_keys.contains?(presented_key) # constant time
+CONFIG.webhook_keys.keys                     # => in the platform's order
+```
+
+A `Docuconf::Anyway::KeySet` prints as `[FILTERED]`. Too few or too many keys is `too_few_items` or
+`too_many_items`; a key outside its length bounds, or an empty one (a stray comma), is `out_of_range`, and no
+error shows a key. The generated docs print the rotation steps.
+
 ### Descriptions and details
 
 `describe`'s text is the contract's `description`: one line, at least 5 characters. Longer documentation, why
@@ -279,8 +308,25 @@ DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONF
   bundle exec rspec spec/conformance_spec.rb
 ```
 
-No capability tags are skipped: Ruby's `Integer` holds every 64-bit value (`int64`), and `json` values are
-validated against their JSON Schema (`json-schema`).
+No capability tags are skipped, and none may be: the runner keeps an allow-list of the tags this SDK supports
+(`int64`, `json-schema`, `key-set`, `deprecated`, `strict-parsing`, `files`, `profiles`, `overlays`), skips a
+case with any other tag rather than run it, and fails when anything was skipped. Ruby's `Integer` holds every
+64-bit value, `json` values are validated against their JSON Schema, and contract-first mode reads key sets,
+deprecated inputs, file inputs (TOML through the `tomlrb` gem; PKCS#12 keystores through Ruby's OpenSSL),
+profiles and overlays, with the strict parsing rules. Each case runs with its files written under a fresh
+`DOCUCONF_FILE_ROOT`.
+
+`spec/export_fixture_spec.rb` declares docuconf-go's shared export fixture (`conformance/export/fixture.yaml`)
+in [`spec/fixtures/export_fixture.rb`](spec/fixtures/export_fixture.rb), exports it and compares it with
+`conformance/export/golden.cue` using `docuconf conformance export`, from `DOCUCONF_CLI` or built with Go from
+`DOCUCONF_GO_DIR`. `spec/golden/gateway.cue` stays as this SDK's own golden file: it also covers YAML
+profiles and overlays, which the shared fixture leaves out.
+
+`scripts/conformance.sh` runs these with the specs that `cue vet` exported contracts:
+
+```sh
+DOCUCONF_GO_DIR=../docuconf-go scripts/conformance.sh
+```
 
 Releases are published to RubyGems from CI with trusted publishing; see [RELEASING.md](RELEASING.md).
 

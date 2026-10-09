@@ -12,17 +12,24 @@ module Docuconf
     #   contract = Docuconf::Anyway::Contract.parse(File.read("contract.json"))
     #   values = contract.load(ENV) # => {"PORT" => 8080, "TIMEOUT" => 30.seconds, ...}
     #
-    # It reads every wire encoding of SPEC §5 (csv, json and indexed lists;
-    # go, iso8601, seconds and timespan durations), with the same parsing and
-    # constraint checks as the declaration path. Problems with the
-    # environment raise ValidationError listing all of them; a malformed
-    # contract raises DeclarationError. File inputs and overlays are not
-    # checked in this mode.
+    # It reads every wire encoding of SPEC §5 (csv, json and indexed lists
+    # and key sets; go, iso8601, seconds and timespan durations), with the
+    # same parsing and constraint checks as the declaration path. File
+    # inputs (SPEC §4.6) are read and checked as at boot, from under
+    # DOCUCONF_FILE_ROOT when it is set. Profiles and overlays (SPEC §4.4,
+    # §4.7) are layered as a host with config files layers them: the
+    # variable's default, then the selected profile's default, then an
+    # overlay, then the environment. Problems raise ValidationError listing
+    # all of them; a malformed contract raises DeclarationError.
     class Contract
       LIST_ENCODINGS = %w[csv json indexed].freeze
       DURATION_ENCODINGS = %w[go iso8601 seconds timespan].freeze
+      OVERLAY_FORMATS = %w[json yaml toml].freeze
 
-      attr_reader :vars, :profiles
+      # An overlay of a contract (SPEC §4.7).
+      ContractOverlay = Struct.new(:name, :format, :path, :key_separator, keyword_init: true)
+
+      attr_reader :vars, :files, :overlays, :profiles
 
       # Accepts the contract as JSON text or as a Hash.
       def self.parse(contract)
@@ -41,6 +48,20 @@ module Docuconf
         vars = data["vars"] || {}
         problems << "vars must be an object" unless vars.is_a?(Hash)
         @vars = vars.is_a?(Hash) ? vars.sort.filter_map { |name, h| build_var(name, h, problems) } : []
+        files = data["files"] || {}
+        problems << "files must be an object" unless files.is_a?(Hash)
+        @files = files.is_a?(Hash) ? files.sort.filter_map { |name, h| build_file(name, h, problems) } : []
+        Declaration.check_files(nil, @files, @vars, problems)
+        @files.each do |f|
+          pv = f[:password_var]
+          next unless pv
+
+          v = var(pv)
+          problems << "file #{f.name}: passwordVar #{pv} must name a declared secret variable" unless v&.secret
+        end
+        overlays = data["overlays"] || {}
+        problems << "overlays must be an object" unless overlays.is_a?(Hash)
+        @overlays = overlays.is_a?(Hash) ? overlays.sort.filter_map { |name, h| build_overlay(name, h, problems) } : []
         @profiles = data["profiles"]
         check_profiles(problems) if @profiles
         raise DeclarationError, problems unless problems.empty?
@@ -48,10 +69,15 @@ module Docuconf
 
       def var(name) = vars.find { |v| v.name == name }
 
+      def file(name) = files.find { |f| f.name == name }
+
       # Validates `env` (a Hash of String to String; the process environment
       # by default) and returns the typed values by variable name: nil for an
       # absent optional variable, durations as Duration.build makes them
-      # (ActiveSupport::Duration when loaded, else seconds).
+      # (ActiveSupport::Duration when loaded, else seconds), and key sets as
+      # KeySet. File inputs are included by name: a config file's data, a
+      # text file's text, a TLSMaterial, CABundle, OpenSSL::PKCS12 or a
+      # binary file's path, and nil for an absent optional file.
       #
       # With termination_log: true (the default), a failure is also written
       # where Kubernetes reports it, as at boot.
@@ -63,8 +89,11 @@ module Docuconf
           raise error
         end
         out = Loaded.new
-        values.each { |name, v| out[name] = v && var(name).type == "duration" ? Duration.build(v) : v }
-        out.secret_names = vars.select(&:secret).map(&:name)
+        values.each do |name, v|
+          decl = var(name)
+          out[name] = decl && !v.nil? ? Values.host_value(decl, v) : v
+        end
+        out.secret_names = vars.select(&:secret).map(&:name) + files.select(&:secret).map(&:name)
         out
       end
 
@@ -87,31 +116,54 @@ module Docuconf
       end
 
       # Returns [contract values by name, violations] without raising.
-      # Durations are Integer nanoseconds.
-      def evaluate(env = ENV)
+      # Durations are Integer nanoseconds, key sets Arrays of keys; file
+      # inputs are included by name.
+      def evaluate(env = ENV, now: Time.now)
         env = env.to_h
+        root = env["DOCUCONF_FILE_ROOT"]
+        root = nil if root&.empty?
         violations = []
+        profile = selected_profile(env)
+        layers = overlay_layers(env, root, violations)
         found = {}
         vars.each do |var|
           raw = raw_value(var, env)
-          value, failure = raw.is_a?(Values::Failure) ? [nil, raw] : Values.from_env(var, raw)
+          layer = layers[var.name]
+          source = nil
+          if raw.nil? || (raw.is_a?(String) && raw.empty? && var.type != "string") || (raw.is_a?(Array) && raw.empty?)
+            raw = nil
+            if layer
+              next found[var.name] = :failed if layer[:bad]
+
+              source = " (from overlay #{layer[:overlay]})"
+            end
+          elsif layer && !layer[:bad]
+            Docuconf::Anyway.warn("#{var.name} is set in the environment and in overlay #{layer[:overlay]}; " \
+              "the environment wins")
+          end
+
+          if raw.nil? && layer && !layer[:bad]
+            value, failure = layer[:items] ? Values.parse_items(var, layer[:items]) : Values.parse_wire(var, layer[:raw])
+          else
+            value, failure = raw.is_a?(Values::Failure) ? [nil, raw] : Values.from_env(var, raw)
+          end
           if failure
-            violations << violation(var, failure)
+            violations << violation(var, failure, source)
             found[var.name] = :failed
             next
           end
           next if value.equal?(Values::UNSET)
 
+          Docuconf::Anyway.warn(Validator.deprecated_message(var.name, var.deprecated)) if var.deprecated
           failures = Values.check(var, value)
           if failures.empty?
             found[var.name] = value
           else
-            failures.each { |f| violations << violation(var, f) }
+            failures.each { |f| violations << violation(var, f, source) }
             found[var.name] = :failed
           end
         end
 
-        profile = selected_profile(found)
         values = {}
         vars.each do |var|
           next if found[var.name] == :failed
@@ -122,13 +174,32 @@ module Docuconf
           end
           values[var.name] = value
         end
+
+        files.each do |f|
+          value, failures = Files.load(f, env: env, password: keystore_password(f, env), now: now)
+          failures.each { |x| violations << Violation.new(input: f.name, kind: :file, code: x.code, message: x.message) }
+          if f.deprecated && failures.empty? && !value.nil?
+            Docuconf::Anyway.warn(Validator.deprecated_message("file #{f.name}", f.deprecated))
+          end
+          values[f.name] = value
+        end
         [values, violations]
       end
 
       private
 
-      def violation(var, failure)
-        Violation.new(input: var.name, kind: :var, code: failure.code, message: failure.message)
+      def violation(var, failure, source = nil)
+        Violation.new(input: var.name, kind: :var, code: failure.code, message: "#{failure.message}#{source}")
+      end
+
+      # The keystore password: its variable's raw value, or the empty
+      # password when the variable is unset (SPEC §11.2 item 7).
+      def keystore_password(file, env)
+        pv = file[:password_var]
+        return nil unless file.type == "keystore"
+        return "" unless pv
+
+        env[pv].to_s
       end
 
       # The raw environment input of a variable: its value, or for an
@@ -138,7 +209,7 @@ module Docuconf
       # Only decimal suffixes with no leading zero are items, so nested keys
       # such as NAME__HOST are ignored.
       def raw_value(var, env)
-        return env[var.name] unless var.type == "list" && var.encoding == "indexed"
+        return env[var.name] unless %w[list keySet].include?(var.type) && var.encoding == "indexed"
 
         prefix = "#{var.name}__"
         count = env.each_key.filter_map { |k| k.delete_prefix(prefix)[INDEX_RE] if k.start_with?(prefix) }
@@ -170,13 +241,64 @@ module Docuconf
         value
       end
 
-      def selected_profile(found)
+      # The profile in effect (SPEC §4.4): the selector's value when the
+      # environment sets it (for a string selector the empty string is a
+      # value, naming a profile with no file), else profiles.default.
+      def selected_profile(env)
         return nil unless @profiles
 
         selector = var(@profiles["selector"])
-        value = found[selector.name] unless found[selector.name] == :failed
-        value = selector.default if value.nil?
-        (value || @profiles["default"]).to_s
+        raw = env[selector.name]
+        return raw if raw && (!raw.empty? || selector.type == "string")
+
+        @profiles["default"].to_s
+      end
+
+      # Reads every overlay (SPEC §4.7), in name order, and returns each
+      # variable's value from the first overlay that sets it:
+      # {name => {overlay:, raw: or items:}}, or {bad: true} once a bad
+      # value has been reported. Problems with an overlay file itself are
+      # file_malformed or file_unreadable for the overlay.
+      def overlay_layers(env, root, violations)
+        layers = {}
+        selector = @profiles && @profiles["selector"]
+        overlays.each do |o|
+          path = root && o.path.start_with?("/") ? File.join(root, o.path) : o.path
+          data, failure = Overlays.parse_file(path, o.format)
+          if failure
+            violations << Violation.new(input: o.name, kind: :overlay, code: failure.code, message: failure.message)
+            next
+          end
+          next if data.nil?
+
+          vars.each do |v|
+            next if v.config_key.nil? || v.name == selector
+
+            found, value = Overlays.dig(data, v.config_key.split(o.key_separator, -1))
+            next if !found || value.nil? # null is unset
+            if layers.key?(v.name)
+              Docuconf::Anyway.warn("#{v.name} is set in overlays #{layers[v.name][:overlay]} and #{o.name}; the first wins")
+              next
+            end
+
+            where = "overlay #{o.name}, at #{v.config_key}"
+            if v.secret
+              # Never print it: it is secret material in a ConfigMap.
+              violations << Violation.new(input: v.name, kind: :var, code: :invalid_type,
+                message: "is secret, but #{where} sets it; supply secrets through the environment")
+              layers[v.name] = {overlay: o.name, bad: true}
+              next
+            end
+            layer, msg = Overlays.wire_value(v, value)
+            if msg
+              violations << Violation.new(input: v.name, kind: :var, code: :invalid_type, message: "#{where}: #{msg}")
+              layers[v.name] = {overlay: o.name, bad: true}
+              next
+            end
+            layers[v.name] = layer.merge(overlay: o.name)
+          end
+        end
+        layers
       end
 
       def check_profiles(problems)
@@ -203,7 +325,9 @@ module Docuconf
         "min" => :min, "max" => :max, "minLength" => :min_length, "maxLength" => :max_length,
         "pattern" => :pattern, "values" => :values, "schemes" => :schemes, "minItems" => :min_items,
         "maxItems" => :max_items, "itemMin" => :item_min, "itemMax" => :item_max,
-        "itemMinLength" => :item_min_length, "itemMaxLength" => :item_max_length, "schema" => :schema
+        "itemMinLength" => :item_min_length, "itemMaxLength" => :item_max_length, "schema" => :schema,
+        "minKeys" => :min_keys, "maxKeys" => :max_keys, "keyMinLength" => :key_min_length,
+        "keyMaxLength" => :key_max_length
       }.freeze
       private_constant :CONSTRAINTS
 
@@ -243,9 +367,17 @@ module Docuconf
               constraints.delete(k)
             end
           end
+        when "keySet"
+          items = "string"
+          encoding = (h["encoding"] || "csv").to_s
+          problems << "#{label}: unknown key set encoding #{encoding.inspect}" unless LIST_ENCODINGS.include?(encoding)
+          problems << "#{label}: a keySet is always secret" unless h["secret"] == true
+          Declaration.check_key_set(constraints, problems, label,
+            names: {min_keys: "minKeys", max_keys: "maxKeys", key_min_length: "keyMinLength", key_max_length: "keyMaxLength"})
         when "enum"
           problems << "#{label}: enum needs a non-empty values list" if Array(constraints[:values]).empty?
         end
+        %i[min_keys max_keys key_min_length key_max_length].each { |k| constraints.delete(k) } unless type == "keySet"
         # The meta-schema allows minLength only on a string, maxLength on a
         # string, url or json, and item lengths only on a string list.
         constraints.delete(:min_length) unless type == "string"
@@ -268,11 +400,12 @@ module Docuconf
         # details are docs only (SPEC §4.2): checked, never read at runtime.
         details = h["details"]&.to_s
         Docs.check(label, details, problems)
+        deprecated = contract_deprecated(label, h, problems, kind: :var)
         var = VarDecl.new(
           attr: label.to_sym, name: label, type: type, description: h["description"].to_s, details: details,
           secret: h["secret"] == true, required: h["required"] == true, default: h["default"],
           constraints: constraints, items: items, regexp: regexp, encoding: encoding,
-          separator: h["separator"]&.to_s
+          separator: h["separator"]&.to_s, deprecated: deprecated, config_key: h["configKey"]&.to_s
         )
         problems << "#{label}: separator must not be empty" if var.separator.empty?
         unless var.default.nil?
@@ -281,6 +414,80 @@ module Docuconf
           failures.each { |f| problems << "#{label}: default #{f.message}" }
         end
         var
+      end
+
+      # A deprecated block (SPEC §4.2), checked: {message:, replaced_by:} or nil.
+      def contract_deprecated(label, h, problems, kind:)
+        d = h["deprecated"]
+        return nil if d.nil?
+        unless d.is_a?(Hash)
+          problems << "#{label}: deprecated must be an object with a message"
+          return nil
+        end
+
+        dep = {message: d["message"].to_s, replaced_by: d["replacedBy"]&.to_s}
+        Declaration.check_deprecated(label, dep, h["required"] == true, problems, kind: kind)
+        dep
+      end
+
+      FILE_OPTIONS = {
+        "dnsNames" => :dns_names, "keyAlgorithms" => :key_algorithms, "minRemaining" => :min_remaining,
+        "requireCA" => :require_ca, "minCertificates" => :min_certificates, "passwordVar" => :password_var,
+        "pattern" => :pattern, "minLength" => :min_length, "maxLength" => :max_length, "schema" => :schema,
+        "format" => :format
+      }.freeze
+      private_constant :FILE_OPTIONS
+
+      # A file input (SPEC §4.6) as the declaration path builds it, so both
+      # run the same boot checks.
+      def build_file(name, h, problems)
+        label = "file #{name}"
+        unless h.is_a?(Hash)
+          problems << "#{label}: must be an object"
+          return nil
+        end
+        type = h["type"].to_s
+        unless FILE_TYPES.include?(type)
+          problems << "#{label}: unknown file type #{h["type"].inspect}"
+          return nil
+        end
+        options = FILE_OPTIONS.each_with_object({}) { |(k, sym), o| o[sym] = h[k] unless h[k].nil? }
+        options[:format] = options[:format].to_s if options[:format]
+        if options[:schema]
+          Schema.problems(options[:schema]).each { |p| problems << "#{label}: schema #{p}" }
+        end
+        if options[:min_remaining]
+          ns = Duration.parse_go(options[:min_remaining].to_s)
+          problems << "#{label}: minRemaining #{options[:min_remaining].inspect} is not a duration" if ns.nil? || ns.negative?
+        end
+        details = h["details"]&.to_s
+        FileDecl.new(
+          accessor: name.to_s.to_sym, name: name.to_s, type: type, description: h["description"].to_s,
+          details: details, required: h["required"] == true,
+          secret: h["secret"] == true || %w[tls keystore].include?(type),
+          path: h["path"].to_s, path_env: h["pathEnv"]&.to_s, reload: (h["reload"] || "restart").to_s,
+          max_size: h["maxSize"], group: h["group"]&.to_s,
+          deprecated: contract_deprecated(label, h, problems, kind: :file), options: options
+        )
+      end
+
+      def build_overlay(name, h, problems)
+        label = "overlay #{name}"
+        unless h.is_a?(Hash)
+          problems << "#{label}: must be an object"
+          return nil
+        end
+        o = ContractOverlay.new(name: name.to_s, format: h["format"].to_s, path: h["path"].to_s,
+          key_separator: h["keySeparator"].to_s)
+        problems << "#{label}: name must be a DNS label" unless INPUT_NAME_RE.match?(o.name)
+        problems << "#{label}: format must be json, yaml or toml" unless OVERLAY_FORMATS.include?(o.format)
+        if !ABS_PATH_RE.match?(o.path) || o.path.split("/").any? { |p| p == "." || p == ".." } ||
+            o.path.include?("//") || o.path.end_with?("/")
+          problems << "#{label}: path #{o.path.inspect} must be absolute and normalised"
+        end
+        problems << "#{label}: keySeparator must be \":\" or \".\"" unless %w[: .].include?(o.key_separator)
+        problems << "#{label}: reload must be restart or watch" unless [nil, "restart", "watch"].include?(h["reload"])
+        o
       end
     end
 

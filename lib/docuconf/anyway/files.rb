@@ -197,11 +197,8 @@ module Docuconf
           return [nil, [Failure.new(:keystore_unreadable, "not a JKS keystore")]]
         end
 
-        if password.nil?
-          return [nil, [Failure.new(:keystore_unreadable, "the keystore password variable is not set")]]
-        end
-
-        [OpenSSL::PKCS12.new(content, password), []]
+        # An unset password variable is the empty password (SPEC §11.2 item 7).
+        [OpenSSL::PKCS12.new(content, password.to_s), []]
       rescue OpenSSL::PKCS12::PKCS12Error
         [nil, [Failure.new(:keystore_unreadable, "cannot open the PKCS#12 keystore with the password from its password variable")]]
       end

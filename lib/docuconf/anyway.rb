@@ -8,6 +8,7 @@ require_relative "anyway/errors"
 require_relative "anyway/duration"
 require_relative "anyway/re2"
 require_relative "anyway/schema"
+require_relative "anyway/key_set"
 require_relative "anyway/values"
 require_relative "anyway/docs"
 require_relative "anyway/declaration"
@@ -327,10 +328,14 @@ module Docuconf
       def docuconf_scrub(text)
         docuconf_secret_attrs.each do |a|
           v = values[a]
-          v = v.to_s unless v.nil?
-          next if v.nil? || v.length < 3
+          # A key set's keys, each on its own.
+          shown = v.is_a?(KeySet) ? v.keys : [v]
+          shown.each do |x|
+            x = x.to_s unless x.nil?
+            next if x.nil? || x.length < 3
 
-          text = text.gsub(v, FILTERED)
+            text = text.gsub(x, FILTERED)
+          end
         end
         text
       rescue StandardError
@@ -400,6 +405,10 @@ module Docuconf
             @docuconf_env[var.attr] = {failure: failure}
           else
             @docuconf_env[var.attr] = {value: value}
+            # anyway_config would coerce the raw string again, more leniently
+            # than SPEC §5 (it trims csv items, drops trailing empty ones and
+            # reads Integer("010") as octal); hand it the value docuconf parsed.
+            data[key] = Values.host_value(var, value)
           end
         end
       end
@@ -461,6 +470,15 @@ Docuconf::Anyway::OverlayLoader.register
 # JSON string.
 Anyway::TypeRegistry.default.accept(:duration) { |v| Docuconf::Anyway::Duration.cast(v) }
 Anyway::TypeRegistry.default.accept(:json) { |v| v.is_a?(String) ? JSON.parse(v) : v }
+# :key_set wraps a list of keys in a Docuconf::Anyway::KeySet (a csv string
+# from credentials or YAML is split on commas, never trimmed).
+Anyway::TypeRegistry.default.accept(:key_set) do |v|
+  case v
+  when Docuconf::Anyway::KeySet, nil then v
+  when String then Docuconf::Anyway::KeySet.new(v.split(",", -1))
+  else Docuconf::Anyway::KeySet.new(Array(v).map(&:to_s))
+  end
+end
 
 Anyway::Config.extend(Docuconf::Anyway::MissingIncludeGuard)
 
