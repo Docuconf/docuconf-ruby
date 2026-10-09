@@ -69,7 +69,9 @@ module Docuconf
       # Parses every PEM certificate. Returns [certs, failures].
       def parse_certificates(pem, label, failure_code: :certificate_invalid)
         blocks = pem.scan(PEM_CERT)
-        return [nil, [Failure.new(failure_code, "#{label} holds no PEM certificate")]] if blocks.empty?
+        # No PEM certificate at all is a malformed file; one that does not
+        # parse is an invalid certificate (SPEC §11.2 item 5).
+        return [nil, [Failure.new(:file_malformed, "#{label} holds no PEM certificate")]] if blocks.empty?
 
         certs = []
         blocks.each_with_index do |b, i|
@@ -97,7 +99,8 @@ module Docuconf
           OpenSSL::PKey.read(key_pem)
         rescue OpenSSL::PKey::PKeyError, ArgumentError
           # The parser's message could quote key material; keep it generic.
-          failures << Failure.new(:certificate_invalid, "tls.key is not a readable PEM private key")
+          code = key_pem.to_s.include?("-----BEGIN") ? :certificate_invalid : :file_malformed
+          failures << Failure.new(code, "tls.key is not a readable PEM private key")
           nil
         end
         return [nil, failures] unless chain

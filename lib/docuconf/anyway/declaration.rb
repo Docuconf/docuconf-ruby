@@ -10,7 +10,7 @@ module Docuconf
       /run /sbin /srv /sys /tmp /usr /usr/lib /usr/local /usr/share /var /var/lib /var/run
     ].freeze
     FEATURE_FLAG_RE = /\A(?:FF|FEATURE|FEATURE_FLAG|ENABLE)_/
-    VAR_TYPES = %w[string int float bool duration url enum list json].freeze
+    VAR_TYPES = %w[string int float bool duration url enum list keySet json].freeze
     MAX_KEY_DEPTH = 8
     FILE_TYPES = %w[config tls caBundle keystore text binary].freeze
     KEY_ALGORITHMS = %w[RSA ECDSA Ed25519].freeze
@@ -19,8 +19,11 @@ module Docuconf
     VAR_OPTIONS = %i[
       type group examples config_key deprecated secret details
       min max min_length max_length pattern values schemes items min_items max_items item_min item_max
-      item_min_length item_max_length schema json_schema
+      item_min_length item_max_length schema json_schema separator
+      min_keys max_keys key_min_length key_max_length
     ].freeze
+    # The most characters a deprecation message may have (SPEC §4.2).
+    MAX_DEPRECATION = 500
 
     # One exported variable: an anyway_config attribute and its docuconf
     # metadata.
@@ -43,7 +46,7 @@ module Docuconf
 
         case type
         when "duration" then "iso8601"
-        when "list" then "csv"
+        when "list", "keySet" then "csv"
         end
       end
 
@@ -54,7 +57,7 @@ module Docuconf
         h["required"] = true if required
         h["secret"] = true if secret
         h["group"] = group if group
-        h["configKey"] = config_key if config_key
+        h["configKey"] = config_key if config_key && !config_key.empty?
         h["examples"] = examples if examples && !examples.empty?
         if deprecated
           d = {"message" => deprecated[:message]}
@@ -89,6 +92,13 @@ module Docuconf
           h["itemMax"] = c[:item_max] if c[:item_max]
           h["itemMinLength"] = c[:item_min_length] if c[:item_min_length]
           h["itemMaxLength"] = c[:item_max_length] if c[:item_max_length]
+        when "keySet"
+          h["encoding"] = encoding
+          h["separator"] = separator if encoding == "csv"
+          h["minKeys"] = c[:min_keys] || 1
+          h["maxKeys"] = c[:max_keys] || 2
+          h["keyMinLength"] = c[:key_min_length] if c[:key_min_length]
+          h["keyMaxLength"] = c[:key_max_length] if c[:key_max_length]
         when "json"
           h["maxLength"] = c[:max_length] if c[:max_length]
           h["schema"] = c[:schema] if c[:schema]
@@ -179,7 +189,8 @@ module Docuconf
         uri: "url", duration: "duration", json: "json"
       }.freeze
       TYPE_ALIASES = {
-        "integer" => "int", "boolean" => "bool", "uri" => "url", "array" => "list", "number" => "float"
+        "integer" => "int", "boolean" => "bool", "uri" => "url", "array" => "list", "number" => "float",
+        "key_set" => "keySet", "keyset" => "keySet"
       }.freeze
 
       # Builds and checks the declaration for an Anyway::Config subclass.
@@ -240,7 +251,7 @@ module Docuconf
 
           constraints = {}
           %i[min max min_length max_length pattern schemes min_items max_items item_min item_max
-            item_min_length item_max_length].each do |k|
+            item_min_length item_max_length min_keys max_keys key_min_length key_max_length].each do |k|
             constraints[k] = m[k] unless m[k].nil?
           end
           if %w[int float].include?(type)
@@ -255,6 +266,11 @@ module Docuconf
           end
           check_item_bounds(type, items, constraints, problems, env)
           check_lengths(type, items, constraints, problems, env)
+          check_key_set(constraints, problems, env) if type == "keySet"
+          separator = m[:separator]&.to_s
+          if separator && separator.empty?
+            problems << "#{env}: separator must not be empty"
+          end
           constraints[:values] = m[:values].map(&:to_s) if m[:values]
           if type == "duration"
             %i[min max].each do |k|
@@ -295,6 +311,11 @@ module Docuconf
             problems << "#{env}: values applies only to enum variables"
           end
 
+          if type == "keySet"
+            # A key set is always secret (SPEC §4.3).
+            problems << "#{env}: a key set is always secret; remove secret: false" if m[:secret] == false
+            m = m.merge(secret: true)
+          end
           secret = m[:secret] == true
           required = klass.docuconf_required_in_contract?(attr) && default.nil?
           if secret && !default.nil?
@@ -304,14 +325,15 @@ module Docuconf
             problems << "#{env}: a secret must not have examples"
           end
           deprecated = normalize_deprecated(m[:deprecated])
+          check_deprecated(env, deprecated, klass.docuconf_required_in_contract?(attr), problems, kind: :var)
 
           var = VarDecl.new(
             attr: attr, name: env, type: type, description: desc.to_s, details: details, secret: secret,
             required: required,
             default: default, constraints: constraints, group: m[:group]&.to_s,
-            examples: m[:examples]&.map(&:to_s), config_key: m[:config_key]&.to_s || "#{klass.config_name}.#{attr}",
+            examples: m[:examples]&.map(&:to_s), config_key: config_key_for(klass, attr, m),
             deprecated: deprecated, items: items, regexp: regexp, coercion: coercion_for(type, items),
-            lenient_duration: type == "duration"
+            lenient_duration: type == "duration", separator: separator
           )
 
           if !default.nil? && !secret
@@ -357,6 +379,15 @@ module Docuconf
         end
       end
 
+      # The configKey (SPEC §4.2): config_key:, or anyway_config's own key
+      # path, <config_name>.<attr>. config_key: false leaves it out, so the
+      # variable can only come from the environment.
+      def self.config_key_for(klass, attr, m)
+        return nil if m[:config_key] == false
+
+        m[:config_key]&.to_s || "#{klass.config_name}.#{attr}"
+      end
+
       def self.env_name(klass, attr)
         prefix = klass.env_prefix.to_s
         prefix.empty? ? attr.to_s.upcase : "#{prefix}_#{attr.to_s.upcase}"
@@ -371,6 +402,7 @@ module Docuconf
           return [nil, nil, "unknown type #{m[:type].inspect}; one of #{VAR_TYPES.join(", ")}"] unless VAR_TYPES.include?(t)
 
           items = nil
+          items = "string" if t == "keySet"
           if t == "list"
             items = (m[:items] || list_items(coercion, default)).to_s
             items = TYPE_ALIASES.fetch(items, items)
@@ -472,7 +504,9 @@ module Docuconf
         %i[min_length] => ["string", %w[string]],
         %i[max_length] => ["string, url or json", %w[string url json]],
         %i[schemes] => ["url", %w[url]],
-        %i[min_items max_items] => ["list", %w[list]]
+        %i[min_items max_items] => ["list", %w[list]],
+        %i[min_keys max_keys key_min_length key_max_length] => ["keySet", %w[keySet]],
+        %i[separator] => ["list or keySet", %w[list keySet]]
       }.freeze
 
       # A constraint that cannot apply to the variable's type would be
@@ -510,6 +544,7 @@ module Docuconf
         when "duration" then :duration
         when "json" then :json
         when "list" then {type: items == "int" ? :integer : :string, array: true}
+        when "keySet" then :key_set
         end
       end
 
@@ -577,11 +612,57 @@ module Docuconf
         end
       end
 
+      # A key set's bounds (SPEC §4.3): minKeys at least 1 (default 1),
+      # maxKeys at least minKeys (default 2), and key lengths at least 1.
+      def self.check_key_set(constraints, problems, label,
+        names: {min_keys: "min_keys", max_keys: "max_keys", key_min_length: "key_min_length",
+                key_max_length: "key_max_length"})
+        %i[min_keys max_keys key_min_length key_max_length].each do |k|
+          next unless constraints.key?(k)
+          next if constraints[k].is_a?(Integer) && constraints[k] >= 1
+
+          problems << "#{label}: #{names[k]} #{constraints[k].inspect} must be an integer of at least 1"
+          constraints.delete(k)
+        end
+        lo = constraints[:min_keys] || 1
+        hi = constraints[:max_keys] || 2
+        problems << "#{label}: #{names[:max_keys]} #{hi} is below #{names[:min_keys]} #{lo}" if hi < lo
+        lo, hi = constraints.values_at(:key_min_length, :key_max_length)
+        problems << "#{label}: #{names[:key_min_length]} #{lo} is above #{names[:key_max_length]} #{hi}" if lo && hi && lo > hi
+      end
+
+      # SPEC §4.2: a deprecation message says what to use instead, or why
+      # the input is going away: not blank, and at most 500 characters. A
+      # required input cannot be deprecated, since the platform could not
+      # stop setting it. replacedBy names an input of the same kind.
+      def self.check_deprecated(label, deprecated, required, problems, kind:)
+        return unless deprecated
+
+        noun = kind == :file ? "file input" : "variable"
+        if required
+          problems << "#{label}: a required #{noun} cannot be deprecated: deprecating it asks the platform to stop " \
+            "#{kind == :file ? "supplying" : "setting"} it"
+        end
+        msg = deprecated[:message].to_s
+        if msg.strip.empty?
+          problems << "#{label}: deprecated must say what to use instead, or why the input is going away"
+        elsif msg.length > MAX_DEPRECATION
+          problems << "#{label}: deprecated message must be at most #{MAX_DEPRECATION} characters"
+        end
+        rb = deprecated[:replaced_by]
+        return if rb.nil?
+
+        re = kind == :file ? INPUT_NAME_RE : ENV_NAME_RE
+        problems << "#{label}: replaced_by #{rb.inspect} must be a #{noun} name" unless re.match?(rb)
+      end
+
       def self.normalize_deprecated(d)
         case d
         when nil, false then nil
         when String then {message: d}
-        when Hash then {message: d[:message].to_s, replaced_by: d[:replaced_by]&.to_s}
+        when Hash
+          d = d.transform_keys(&:to_sym)
+          {message: d[:message].to_s, replaced_by: (d[:replaced_by] || d[:replacedBy])&.to_s}
         else {message: d.to_s}
         end
       end
@@ -613,7 +694,7 @@ module Docuconf
           mounts[dir] ||= label
         end
         vars.each do |v|
-          next if v.secret
+          next if v.secret || v.config_key.nil?
 
           parts = v.config_key.split(OverlayDecl::KEY_SEPARATOR, -1)
           if parts.any?(&:empty?) || parts.size > MAX_KEY_DEPTH
@@ -630,6 +711,7 @@ module Docuconf
           problems << "#{label}: name must be a DNS label: lowercase letters, digits and '-', at most 42 characters, starting with a letter and ending with a letter or digit (e.g. serving-tls)" unless INPUT_NAME_RE.match?(f.name)
           problems << "#{label}: description must be at least 5 characters" if f.description.to_s.strip.length < 5
           Docs.check(label, f.details, problems)
+          check_deprecated(label, f.deprecated, f.required, problems, kind: :file)
           if !ABS_PATH_RE.match?(f.path) || f.path.split("/").any? { |s| s == "." || s == ".." } ||
               f.path.include?("//") || f.path.end_with?("/")
             problems << "#{label}: path #{f.path.inspect} must be absolute and normalised"

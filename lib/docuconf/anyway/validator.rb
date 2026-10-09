@@ -32,11 +32,11 @@ module Docuconf
             next
           end
 
+          if var.deprecated && (info || overlay_attrs.include?(var.attr.to_s))
+            Docuconf::Anyway.warn(Validator.deprecated_message(var.name, var.deprecated))
+          end
           if info
             value = info[:value]
-            if var.deprecated
-              Docuconf::Anyway.warn("#{var.name} is deprecated: #{var.deprecated[:message]}")
-            end
           else
             raw = loaded.key?(var.attr.to_s) ? loaded[var.attr.to_s] : @config.public_send(var.attr)
             # Programmatic overrides (Config.new(port: 1)) win over loaded values.
@@ -80,11 +80,22 @@ module Docuconf
         nil
       end
 
+      # The boot warning for a deprecated input that is set (SPEC §11.2):
+      # its name and message, never its value.
+      def self.deprecated_message(name, deprecated)
+        msg = "#{name} is deprecated: #{deprecated[:message]}"
+        msg += " (replaced by #{deprecated[:replaced_by]})" if deprecated[:replaced_by]
+        msg
+      end
+
       def load_files(decl)
         violations = []
         decl.files.each do |file|
           value, failures = Files.load(file, env: @env, password: keystore_password(decl, file), now: @now)
           @config.docuconf_files[file.accessor] = value
+          if file.deprecated && failures.empty? && !value.nil?
+            Docuconf::Anyway.warn(Validator.deprecated_message("file #{file.name}", file.deprecated))
+          end
           failures.each do |f|
             violations << Violation.new(input: file.name, kind: :file, code: f.code, message: f.message)
           end
@@ -93,6 +104,10 @@ module Docuconf
       end
 
       private
+
+      def overlay_attrs
+        @config.instance_variable_get(:@docuconf_overlay_attrs) || []
+      end
 
       # Says where the value can come from.
       def missing_message(var)

@@ -25,8 +25,8 @@ run lambda { |env|
     }
     [200, {"content-type" => "application/json"}, [JSON.generate(body)]]
   in ["POST", "/webhooks/payments"]
-    # Payment webhooks, signed with any key in WEBHOOK_KEYS (see
-    # config/orders_config.rb for how to rotate it).
+    # Payment webhooks, signed with any key in the WEBHOOK_KEYS key set
+    # (CONFIG.md says how to rotate it).
     body = env["rack.input"].read(1 << 20).to_s
     if Webhook.verify(CONFIG.webhook_keys, body, env["HTTP_X_SIGNATURE"])
       [204, {}, []]

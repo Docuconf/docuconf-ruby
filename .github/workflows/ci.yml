@@ -63,19 +63,36 @@ jobs:
       - name: Install cue
         run: go install cuelang.org/go/cmd/cue@v0.17.1
 
-      # The docuconf-go-facing subset (conformance suite, cue vet of exported
+      - name: Build the docuconf CLI
+        run: (cd docuconf-go/cmd/docuconf && go build -o "$RUNNER_TEMP/docuconf" .)
+
+      # The docuconf-go-facing subset (conformance suite, which fails if any
+      # case is skipped; the shared export fixture; cue vet of exported
       # contracts); docuconf-go's downstream workflow runs the same script.
       - name: Run scripts/conformance.sh
         run: scripts/conformance.sh
         env:
           DOCUCONF_GO_DIR: ${{ github.workspace }}/docuconf-go
+          DOCUCONF_CLI: ${{ runner.temp }}/docuconf
       - name: Run specs
         run: bundle exec rspec
         env:
+          DOCUCONF_GO_DIR: ${{ github.workspace }}/docuconf-go
+          DOCUCONF_CLI: ${{ runner.temp }}/docuconf
           DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
           DOCUCONF_REQUIRE_VET: "1"
           DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
           DOCUCONF_REQUIRE_CONFORMANCE: "1"
+
+      # The shared export fixture (docuconf-go conformance/export), declared
+      # in spec/fixtures/export_fixture.rb, compared as data with the golden
+      # contract. spec/export_fixture_spec.rb runs the same check.
+      - name: Shared export fixture matches the golden contract
+        run: |
+          bundle exec ruby -Ilib -rdocuconf/anyway -r./spec/fixtures/export_fixture -e \
+            'print Docuconf::Anyway.export(name: "docuconf-fixture", app_version: "1.0.0", classes: [Fixtures::ExportFixture], profiles: false)' \
+            > "$RUNNER_TEMP/exported.cue"
+          "$RUNNER_TEMP/docuconf" conformance export --golden docuconf-go/conformance/export/golden.cue "$RUNNER_TEMP/exported.cue"
 
       - name: Build the gem
         run: gem build docuconf-anyway.gemspec

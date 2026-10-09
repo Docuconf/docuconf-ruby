@@ -13,15 +13,18 @@ module Docuconf
     # int, Float or Integer for float, true/false, nanoseconds (Integer) for
     # duration, Array for list, parsed JSON for json, String otherwise.
     module Values
-      INT_RE = /\A-?(?:0|[1-9][0-9]*)\z/
-      FLOAT_RE = /\A[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\z/
+      # The exact wire grammars of SPEC §5. Ruby's Integer() and Float()
+      # take more (0x10, 1_000, octal 010, surrounding spaces), so every
+      # value is matched against these first.
+      INT_RE = /\A[+-]?[0-9]+\z/
+      FLOAT_RE = /\A[+-]?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\z/
       URL_RE = /\A[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s]+\z/
       INT64 = (-(2**63))..((2**63) - 1)
-      # anyway_config's :boolean caster treats these as true; everything else
-      # is false. docuconf accepts them plus their false counterparts and
-      # rejects anything else, rather than silently reading "flase" as false.
-      TRUE_RE = /\A(?:true|t|yes|y|1)\z/i
-      FALSE_RE = /\A(?:false|f|no|n|0)\z/i
+      # SPEC §5: true or false in any case, and nothing else. anyway_config's
+      # :boolean caster also reads t, yes, y and 1 as true and everything
+      # else as false; docuconf rejects those forms with invalid_type.
+      TRUE_RE = /\Atrue\z/i
+      FALSE_RE = /\Afalse\z/i
 
       Failure = Struct.new(:code, :message)
 
@@ -77,7 +80,7 @@ module Docuconf
           expected = Duration.describe_encoding(var.encoding)
           expected += " or a Go duration such as 30s" if var.respond_to?(:lenient_duration) && var.lenient_duration
           [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not #{expected}")]
-        when "list" then parse_list(var, raw)
+        when "list", "keySet" then parse_list(var, raw)
         when "json"
           begin
             parsed = JSON.parse(raw, allow_nan: false)
@@ -93,9 +96,10 @@ module Docuconf
         end
       end
 
-      # A list in its encoding: csv (split on the separator, trimming
-      # spaces around it as anyway_config's array coercion does), json (an
-      # array), or indexed (raw is already the Array of item strings).
+      # A list or key set in its encoding: csv (split on every separator,
+      # never trimmed, so "a, b" is "a" and " b" and "a,,b" has an empty
+      # item), json (an array), or indexed (raw is already the Array of
+      # item strings).
       def parse_list(var, raw)
         items =
           case var.encoding
@@ -110,8 +114,14 @@ module Docuconf
 
             return parse_json_items(var, parsed)
           else
-            raw.split(/\s*#{Regexp.escape(var.separator)}\s*/, -1)
+            raw.split(var.separator, -1)
           end
+        parse_items(var, items)
+      end
+
+      # Items that are already split (an indexed list, csv items, or a list
+      # from an overlay), each parsed by its item type.
+      def parse_items(var, items)
         return [items, nil] unless var.items == "int"
 
         out = []
@@ -141,7 +151,8 @@ module Docuconf
       def parse_int(raw, var = nil)
         return [nil, Failure.new(:invalid_type, "#{show(var, raw)} is not an integer")] unless INT_RE.match?(raw)
 
-        i = raw.to_i
+        # Decimal, whatever the leading zeros: Integer("010") would be octal.
+        i = Integer(raw, 10)
         return [nil, Failure.new(:out_of_range, "#{show(var, raw)} is outside the 64-bit integer range")] unless INT64.cover?(i)
 
         [i, nil]
@@ -208,6 +219,11 @@ module Docuconf
           else
             value.all? { |x| x.is_a?(String) || x.is_a?(Symbol) || x.is_a?(Numeric) } ? [value.map(&:to_s), nil] : bad.call
           end
+        when "keySet"
+          value = value.keys if value.is_a?(KeySet)
+          return bad.call unless value.is_a?(Array) && value.all? { |x| x.is_a?(String) }
+
+          [value.dup, nil]
         when "json"
           value = Schema.deep_stringify(value)
           # A structured value (from YAML, an overlay or a default) has no
@@ -266,7 +282,7 @@ module Docuconf
           out << Failure.new(:out_of_range, "#{show(var, value)} is below min #{c[:min]}") if c[:min] && value < c[:min]
           out << Failure.new(:out_of_range, "#{show(var, value)} is above max #{c[:max]}") if c[:max] && value > c[:max]
         when "duration"
-          shown = var.secret ? "the value" : Duration.format_go(value)
+          shown = var.secret ? "the value" : Duration.format_go(value, signed: true)
           if c[:min] && value < Duration.parse_go(c[:min])
             out << Failure.new(:out_of_range, "#{shown} is below min #{c[:min]}")
           end
@@ -310,6 +326,8 @@ module Docuconf
                 "item #{i}#{var.secret ? "" : " (#{value[i].inspect})"} is #{char_length(value[i])} characters, above item_max_length #{hi}")
             end
           end
+        when "keySet"
+          out.concat(check_key_set(var, value))
         when "json"
           if c[:schema]
             errs = Schema.validate(c[:schema], value)
@@ -320,6 +338,44 @@ module Docuconf
           end
         end
         out
+      end
+
+      # A key set's keys (SPEC §4.3): their number within min_keys..max_keys,
+      # and each key's length in characters within key_min_length..
+      # key_max_length; an empty key (a stray separator) is always out of
+      # range. Messages give positions and lengths, never a key.
+      def check_key_set(var, keys)
+        c = var.constraints
+        out = []
+        min = c[:min_keys] || 1
+        max = c[:max_keys] || 2
+        out << Failure.new(:too_few_items, "has #{keys.size} key(s), needs at least #{min}") if keys.size < min
+        out << Failure.new(:too_many_items, "has #{keys.size} key(s), allows at most #{max}") if keys.size > max
+        keys.each_with_index do |k, i|
+          n = char_length(k)
+          if n.zero?
+            out << Failure.new(:out_of_range, "key #{i} is empty (a stray separator?)")
+          elsif c[:key_min_length] && n < c[:key_min_length]
+            out << Failure.new(:out_of_range, "key #{i} is #{n} characters, below keyMinLength #{c[:key_min_length]}")
+          elsif c[:key_max_length] && n > c[:key_max_length]
+            out << Failure.new(:out_of_range, "key #{i} is #{n} characters, above keyMaxLength #{c[:key_max_length]}")
+          else
+            next
+          end
+          break
+        end
+        out
+      end
+
+      # The value handed to anyway_config for a contract value docuconf has
+      # parsed: what its casters turn into the app's value without parsing
+      # a string again.
+      def host_value(var, value)
+        case var.type
+        when "duration" then Duration.build(value)
+        when "keySet" then KeySet.new(value)
+        else value
+        end
       end
 
       # How a value appears in a message: never for a secret.

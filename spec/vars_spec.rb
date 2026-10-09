@@ -41,8 +41,16 @@ RSpec.describe "variables at boot" do
     end
   end
 
-  it "rejects leading zeros, signs and spaces" do
-    ["+5", "007", " 5", "5 ", "1e3"].each do |raw|
+  it "reads a sign and leading zeros as decimal (SPEC §5)" do
+    {"+5" => 5, "007" => 7, "010" => 10}.each do |raw, want|
+      in_gateway("GATEWAY_GOMEMLIMIT" => raw) do
+        expect(Fixtures::GatewayConfig.new.gomemlimit).to eq want
+      end
+    end
+  end
+
+  it "rejects spaces, exponents, prefixes and underscores" do
+    [" 5", "5 ", "5\n", "1e3", "0x10", "0o17", "0b101", "1_000", "5.0", "+-5"].each do |raw|
       in_gateway("GATEWAY_PORT" => raw) do
         expect { Fixtures::GatewayConfig.new }.to raise_error(Docuconf::Anyway::ValidationError) { |e|
           expect(codes(e)).to eq [["GATEWAY_PORT", :invalid_type]]

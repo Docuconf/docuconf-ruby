@@ -11,20 +11,30 @@ module Docuconf
         "ns" => 1, "us" => 1_000, "µs" => 1_000, "μs" => 1_000, "ms" => 1_000_000,
         "s" => 1_000_000_000, "m" => 60_000_000_000, "h" => 3_600_000_000_000
       }.freeze
+      # One Go duration component: a decimal number with an optional
+      # fraction (1.5, .5, 1.), then a lower-case unit.
       GO_PART = /\A([0-9]*(?:\.[0-9]*)?)(ns|us|µs|μs|ms|s|m|h)/
       # The meta-schema's #Duration: integer components, no sign.
       CONTRACT_FORM = /\A(?:[0-9]+(?:ns|us|ms|s|m|h))+\z/
-      ISO8601 = /\AP(?:([0-9]+)W)?(?:([0-9]+)D)?(?:T(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+)(?:[.,]([0-9]{1,9}))?S)?)?\z/
+      # P[nD][T[nH][nM][nS]], where n has an optional fraction after . or ,
+      # (SPEC §5). Upper case, unsigned, and no years, months or weeks.
+      ISO_NUM = "([0-9]+(?:[.,][0-9]+)?)"
+      ISO8601 = /\AP(?:#{ISO_NUM}D)?(?:T(?:#{ISO_NUM}H)?(?:#{ISO_NUM}M)?(?:#{ISO_NUM}S)?)?\z/
       UNITS = [["h", 3_600_000_000_000], ["m", 60_000_000_000], ["s", 1_000_000_000],
         ["ms", 1_000_000], ["us", 1_000], ["ns", 1]].freeze
+      # The largest duration: Go's time.Duration, in nanoseconds.
+      MAX_NS = (2**63) - 1
 
       module_function
 
-      # Parses Go duration syntax (time.ParseDuration). Returns nanoseconds or nil.
+      # Parses Go duration syntax exactly as time.ParseDuration does (SPEC
+      # §5): an optional sign, then 0 or one or more numbers each followed
+      # by a unit. The result is truncated to whole nanoseconds; beyond
+      # ±(2^63-1) it is nil. Returns nanoseconds or nil.
       def parse_go(input)
         return nil unless input.is_a?(String)
 
-        s = input.dup
+        s = input
         sign = 1
         if s.start_with?("-", "+")
           sign = -1 if s.start_with?("-")
@@ -39,54 +49,60 @@ module Docuconf
           return nil unless m
           return nil unless m[1].match?(/[0-9]/)
 
-          total += Rational(m[1].start_with?(".") ? "0#{m[1]}" : m[1].chomp(".")) * NS.fetch(m[2])
+          num = m[1]
+          num = "0#{num}" if num.start_with?(".")
+          num = num.chomp(".")
+          total += Rational(num) * NS.fetch(m[2])
           s = s[m[0].length..]
         end
-        (sign * total).round
+        ns = total.truncate
+        return nil if ns > MAX_NS
+
+        sign * ns
       end
 
-      # Parses ISO 8601 durations of weeks, days, hours, minutes and seconds
-      # (PT90S, P1DT2H, PT1.5S). Years and months have no fixed length and are
-      # rejected. Returns nanoseconds or nil.
+      # Parses ISO 8601 durations of days, hours, minutes and seconds
+      # (PT90S, P1DT2H, PT1,5S). Years, months and weeks have no fixed
+      # length and are rejected. Returns nanoseconds or nil.
       def parse_iso8601(input)
         return nil unless input.is_a?(String)
 
         m = ISO8601.match(input)
         return nil unless m
-        return nil if m.captures.compact.empty?
-        return nil if input.end_with?("T")
+        return nil if input == "P" || input.end_with?("T")
 
-        w, d, h, mi, s, frac = m.captures
-        secs = (w.to_i * 7 * 86_400) + (d.to_i * 86_400) + (h.to_i * 3600) + (mi.to_i * 60) + s.to_i
-        ns = secs * 1_000_000_000
-        ns += frac.ljust(9, "0").to_i if frac
-        ns
+        total = Rational(0)
+        m.captures.zip([86_400, 3600, 60, 1]).each do |n, secs|
+          total += Rational(n.tr(",", ".")) * secs * 1_000_000_000 if n
+        end
+        ns = total.truncate
+        ns > MAX_NS ? nil : ns
       end
 
-      SECONDS = /\A([0-9]+)(?:\.([0-9]{1,9}))?\z/
+      SECONDS = /\A[0-9]+(?:\.[0-9]+)?\z/
       # .NET TimeSpan's invariant "c" format: [d.]hh:mm:ss[.fffffff].
       TIMESPAN = /\A(?:([0-9]+)\.)?([0-9]{1,2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,7}))?\z/
 
       # Parses a duration in a contract wire encoding (SPEC §5): go,
-      # iso8601, seconds or timespan. Returns nanoseconds or nil; a
-      # duration is never negative.
+      # iso8601, seconds or timespan. Returns nanoseconds or nil. Only the
+      # go encoding has a sign, so only it can be negative (-1m30s).
       def parse_wire(input, encoding)
-        ns =
-          case encoding
-          when "go" then parse_go(input)
-          when "iso8601" then parse_iso8601(input)
-          when "seconds" then parse_seconds(input)
-          when "timespan" then parse_timespan(input)
-          end
-        ns&.negative? ? nil : ns
+        case encoding
+        when "go" then parse_go(input)
+        when "iso8601" then parse_iso8601(input)
+        when "seconds" then parse_seconds(input)
+        when "timespan" then parse_timespan(input)
+        end
       end
 
-      # A decimal number of seconds (90, 0.25). Returns nanoseconds or nil.
+      # A decimal number of seconds (90, 0.25): unsigned, no exponent.
+      # Returns nanoseconds (truncated) or nil.
       def parse_seconds(input)
-        m = SECONDS.match(input.to_s)
-        return nil unless m
+        s = input.to_s
+        return nil unless SECONDS.match?(s)
 
-        (m[1].to_i * 1_000_000_000) + (m[2] ? m[2].ljust(9, "0").to_i : 0)
+        ns = (Rational(s) * 1_000_000_000).truncate
+        ns > MAX_NS ? nil : ns
       end
 
       # A .NET TimeSpan ([d.]hh:mm:ss[.fff]). Returns nanoseconds or nil.
@@ -98,7 +114,8 @@ module Docuconf
         return nil if h.to_i > 23 || mi.to_i > 59 || s.to_i > 59
 
         secs = (d.to_i * 86_400) + (h.to_i * 3600) + (mi.to_i * 60) + s.to_i
-        (secs * 1_000_000_000) + (frac ? frac.ljust(9, "0").to_i : 0)
+        ns = (secs * 1_000_000_000) + (frac ? frac.ljust(9, "0").to_i : 0)
+        ns > MAX_NS ? nil : ns
       end
 
       # A wire encoding's name for messages.
@@ -110,8 +127,14 @@ module Docuconf
       end
 
       # Canonical Go form, as the contract requires ("1h30m", "1s500ms", "0s").
-      def format_go(ns)
-        raise ArgumentError, "cannot express a negative duration in a contract" if ns.negative?
+      # A negative duration, which only a go-encoded value can be, is
+      # allowed with signed: true ("-1m30s"); a contract never holds one.
+      def format_go(ns, signed: false)
+        if ns.negative?
+          raise ArgumentError, "cannot express a negative duration in a contract" unless signed
+
+          return "-#{format_go(-ns)}"
+        end
         return "0s" if ns.zero?
 
         out = +""
