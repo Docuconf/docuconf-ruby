@@ -91,6 +91,13 @@ RSpec.describe "length limits" do
     expect(codes(violations("LEN_BRANCHES" => "🚀"))).to eq [["LEN_BRANCHES", :out_of_range]]
   end
 
+  it "keeps empty items, so a trailing or doubled separator fails the item length" do
+    e = violations("LEN_BRANCHES" => "BE,")
+    expect(codes(e)).to eq [["LEN_BRANCHES", :out_of_range]]
+    expect(e.message).to include("item 1").and include("below item_min_length 2")
+    expect(codes(violations("LEN_BRANCHES" => "BE,,ZH"))).to eq [["LEN_BRANCHES", :out_of_range]]
+  end
+
   it "reports a too-long secret by its length, never its value" do
     e = violations("LEN_DB_URL" => "postgres://app:s3cr3t@db:5432/app")
     expect(codes(e)).to eq [["LEN_DB_URL", :out_of_range]]
