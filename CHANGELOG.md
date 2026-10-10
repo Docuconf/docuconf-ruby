@@ -4,6 +4,39 @@ All notable changes to docuconf-anyway are documented here. Entries after 0.1.0 
 [release-please](https://github.com/googleapis/release-please) from Conventional Commit messages; see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## [0.2.0](https://github.com/Docuconf/docuconf-ruby/compare/v0.1.0...v0.2.0) (2026-10-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* values that anyway_config or the old pre-check accepted are now invalid_type: bools t, f, yes, no, y, n, 1 and 0; duration weeks in ISO 8601 (P1W). Ints with a sign or leading zeros are now accepted and read as decimal. csv list items are no longer trimmed ("a, b" is "a" and " b") and trailing empty items are kept. A TLS file with no PEM certificate or key at all is file_malformed instead of certificate_invalid. An unset keystore password variable now opens the keystore with the empty password instead of failing. Contract#evaluate and #load also return file inputs by name, and the profile in effect when the selector is unset is profiles.default.
+
+### Features
+
+* beta suite (keySet, deprecated rules, strict parsing, files, profiles, overlays) ([f497330](https://github.com/Docuconf/docuconf-ruby/commit/f497330d6ce6bd6683a4cb01535aebb4c1601e3d))
+* beta suite (keySet, deprecated rules, strict parsing, files, profiles, overlays) ([6d4c198](https://github.com/Docuconf/docuconf-ruby/commit/6d4c198aae6962663bb1fbb96ddc2c7b05e3b3e8))
+* **examples:** dual-key webhook key set with rotation ([a9bcc25](https://github.com/Docuconf/docuconf-ruby/commit/a9bcc2526d1a731ff82927811bec7453121a5249))
+* **examples:** dual-key webhook key set with rotation ([b27c0c1](https://github.com/Docuconf/docuconf-ruby/commit/b27c0c1f0ef10bde525d30fc4eeef84df21e3bc7))
+* export description and details from doc comments ([c261dc4](https://github.com/Docuconf/docuconf-ruby/commit/c261dc4d3260168b6189578055ac86a81cff8ad2))
+* export description and details from doc comments ([1e695de](https://github.com/Docuconf/docuconf-ruby/commit/1e695de01b45ee3a319684e1dbad47074f640ce4))
+* maxLength on url/json and item length limits on string lists ([83198b0](https://github.com/Docuconf/docuconf-ruby/commit/83198b0db78a92c5c5290400df7d53f78cd11f99))
+* maxLength on url/json and item length limits on string lists ([39f4b63](https://github.com/Docuconf/docuconf-ruby/commit/39f4b639663f5a222d6dff0bd1e705f9ad000ee6))
+
+
+### Bug Fixes
+
+* add racc to the Gemfile so TOML loads without the rails group ([5fb29fc](https://github.com/Docuconf/docuconf-ruby/commit/5fb29fc1ea2cdf890ba3acbcba42dd4633de67d9))
+* add racc to the Gemfile so TOML loads without the rails group ([9b5de60](https://github.com/Docuconf/docuconf-ruby/commit/9b5de60f43328a1d0f2fd88a19714b933c3627c5))
+* devX review fixes (typed constraints, RAILS_ENV-independent export, secret redaction, clean Rails boot) ([847feba](https://github.com/Docuconf/docuconf-ruby/commit/847feba2cdaa5c53a714d0c770ab9b4a70e1d486))
+* keep empty items when splitting a csv list ([f849ea7](https://github.com/Docuconf/docuconf-ruby/commit/f849ea767a010ee193341948a359e83aa0efa3e2))
+* keep empty items when splitting a csv list ([a92a1e2](https://github.com/Docuconf/docuconf-ruby/commit/a92a1e2c20c7f01446d8d9dbeb568b91d541d914))
+
+
+### Documentation
+
+* **examples:** length limits and generated CONFIG docs ([81b7eb0](https://github.com/Docuconf/docuconf-ruby/commit/81b7eb033885a13a7d81a5a3b61998884529de0d))
+* link docuconf.dev ([1e51f8a](https://github.com/Docuconf/docuconf-ruby/commit/1e51f8ad739a5ddb87f2fde11730fca299fb267e))
+
 ## 0.1.0
 
 First version: typed configuration contracts for [anyway_config](https://github.com/palkan/anyway_config),
