@@ -17,6 +17,10 @@ module Docuconf
     # (YAML, credentials, overlays, environment) into a new instance and
     # validated; if that passes, its values are copied into the running
     # config, otherwise the problems are logged and the old values kept.
+    #
+    # Each accepted reload bumps the input's ReloadStatus and calls its
+    # on-change hooks (see Reloads); a rejected one records the rejection.
+    # Keystores are reopened with the password read at boot.
     class Watcher
       DEFAULT_INTERVAL = 2.0
 
@@ -58,12 +62,17 @@ module Docuconf
 
       attr_reader :interval
 
-      def initialize(config, files, overlays: [], interval: DEFAULT_INTERVAL, env: ENV)
+      # passwords: each watched keystore's password by accessor. By default
+      # the one the config was loaded with: a reload reuses it and never
+      # reads the environment again (it does not change in a running
+      # process, so rotating a keystore's password needs a rollout).
+      def initialize(config, files, overlays: [], interval: DEFAULT_INTERVAL, env: ENV, passwords: nil)
         @config = config
         @files = files
         @overlays = overlays
         @interval = interval
         @env = env
+        @passwords = passwords || boot_passwords(config, files)
         @signatures = files.to_h { |f| [f.accessor, signature(f)] }
         @overlay_signatures = overlays.to_h { |o| [o.name, overlay_signature(o)] }
       end
@@ -144,23 +153,37 @@ module Docuconf
         @config || @config_ref.__getobj__
       end
 
-      def reload(file)
+      def reloads = config.docuconf_reloads
+
+      # The key a file input's status and hooks are kept under.
+      def file_key(file) = file.accessor
+
+      def store_file(file, value)
+        config.docuconf_files[file.accessor] = value
+      end
+
+      def boot_passwords(config, files)
+        keystores = files.select { |f| f.type == "keystore" }
+        return {} if keystores.empty?
+
         validator = Validator.new(config, env: @env)
-        password = validator.send(:keystore_password, config.class.docuconf_declaration, file)
-        value, failures = Files.load(file, env: @env, password: password)
+        decl = config.class.docuconf_declaration
+        keystores.to_h { |f| [f.accessor, validator.send(:keystore_password, decl, f)] }
+      end
+
+      def reload(file)
+        value, failures = Files.load(file, env: @env, password: @passwords[file.accessor])
         unless failures.empty?
           failures.each do |f|
             Docuconf::Anyway.warn("reload of #{file.name} rejected, keeping the previous value: [#{f.code}] #{f.message}", once: false)
           end
+          reloads.rejected(file_key(file), input: file.name, codes: failures.map(&:code))
           return false
         end
 
-        config.docuconf_files[file.accessor] = value
-        Array(config.docuconf_listeners[file.accessor]).each do |l|
-          l.call(value)
-        rescue StandardError => e
-          Docuconf::Anyway.warn("listener for #{file.name} failed: #{e.class}: #{e.message}")
-        end
+        store_file(file, value)
+        reloads.accepted(file_key(file))
+        reloads.fire(file_key(file), value, input: file.name)
         true
       end
 
@@ -179,6 +202,7 @@ module Docuconf
           e.violations.each do |v|
             Docuconf::Anyway.warn("reload of overlay #{names} rejected, keeping the previous values: #{v}", once: false)
           end
+          overlays.each { |o| reloads.rejected(:"overlay:#{o.name}", input: o.name, codes: e.violations.map(&:code)) }
           return false
         ensure
           Thread.current[:docuconf_no_watch], Thread.current[:docuconf_reloading] = saved
@@ -188,11 +212,8 @@ module Docuconf
         %i[@docuconf_env @docuconf_loaded].each do |ivar|
           cfg.instance_variable_set(ivar, fresh.instance_variable_get(ivar))
         end
-        cfg.docuconf_overlay_listeners.each do |l|
-          l.call(cfg)
-        rescue StandardError => e
-          Docuconf::Anyway.warn("overlay listener failed: #{e.class}: #{e.message}")
-        end
+        overlays.each { |o| reloads.accepted(:"overlay:#{o.name}") }
+        reloads.fire(:overlays, cfg, input: "overlay #{overlays.map(&:name).join(", ")}")
         true
       end
 
@@ -216,6 +237,51 @@ module Docuconf
         rescue SystemCallError
           nil
         end
+      end
+    end
+  end
+end
+
+module Docuconf
+  module Anyway
+    # The watcher for a contract-first load (Contract#load): the same
+    # polling as Watcher, writing into the Loaded values instead of a
+    # config. A changed overlay evaluates the contract again against the
+    # environment read at load.
+    class ContractWatcher < Watcher
+      def initialize(contract, loaded, files, overlays: [], interval: DEFAULT_INTERVAL, env: ENV, passwords: {})
+        @contract = contract
+        super(loaded, files, overlays: overlays, interval: interval, env: env, passwords: passwords)
+      end
+
+      private
+
+      def reloads = config.reloads
+
+      def file_key(file) = file.name
+
+      def store_file(file, value)
+        config[file.name] = value
+      end
+
+      def reload_values(overlays)
+        values, violations = @contract.evaluate(@env)
+        # File inputs are reloaded (or kept) on their own.
+        violations = violations.reject { |v| v.kind == :file }
+        unless violations.empty?
+          names = overlays.map(&:name).join(", ")
+          violations.each do |v|
+            Docuconf::Anyway.warn("reload of overlay #{names} rejected, keeping the previous values: #{v}", once: false)
+          end
+          overlays.each { |o| reloads.rejected("overlay:#{o.name}", input: o.name, codes: violations.map(&:code)) }
+          return false
+        end
+
+        loaded = config
+        @contract.vars.each { |v| @contract.store(loaded, v.name => values[v.name]) }
+        overlays.each { |o| reloads.accepted("overlay:#{o.name}") }
+        reloads.fire(:overlays, loaded, input: "overlay #{overlays.map(&:name).join(", ")}")
+        true
       end
     end
   end
