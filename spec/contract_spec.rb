@@ -22,6 +22,90 @@ RSpec.describe "contract-first mode" do
     e.violations.map { |v| [v.input, v.code] }
   end
 
+  it "names an empty key by its 1-based position, never a key" do
+    vars = {"API_KEYS" => {"type" => "keySet", "description" => "Keys that callers present", "secret" => true,
+                           "maxKeys" => 3}}
+    {"old-key," => "key 2 is empty", ",new-key" => "key 1 is empty", "a-key,,b-key" => "key 2 is empty"}.each do |raw, msg|
+      load(vars, {"API_KEYS" => raw})
+      raise "expected a ValidationError"
+    rescue Docuconf::Anyway::ValidationError => e
+      expect(e.violations.map { |v| [v.input, v.code, v.message] }).to eq([["API_KEYS", :out_of_range, msg]]), raw
+      expect(e.message).not_to include("-key")
+    end
+  end
+
+  describe "reload: watch" do
+    def watched_contract
+      contract(
+        {"PORT" => {"type" => "int", "description" => "Listen port", "default" => 80, "min" => 1, "configKey" => "port"}},
+        "files" => {"motd" => {"type" => "text", "description" => "Message of the day", "path" => "/etc/svc/motd/motd.txt",
+                               "reload" => "watch", "minLength" => 1}},
+        "overlays" => {"platform" => {"format" => "json", "path" => "/etc/svc/overlay/svc.json", "keySeparator" => ".",
+                                      "reload" => "watch"}}
+      )
+    end
+
+    it "reloads watched files and overlays into the loaded values, with hooks and status" do
+      Dir.mktmpdir do |root|
+        write_file(root, "etc/svc/motd/motd.txt", "one")
+        write_file(root, "etc/svc/overlay/svc.json", '{"port": 81}')
+        env = {"DOCUCONF_FILE_ROOT" => root, "DOCUCONF_WATCH_INTERVAL" => "0"}
+        values = Docuconf::Anyway::Contract.parse(watched_contract).load(env, termination_log: false, watch: true)
+        expect(values.watcher).to be_a(Docuconf::Anyway::ContractWatcher)
+        expect(values.watcher.alive?).to be false # interval 0: polled by hand here
+        expect(values.reload_status.keys).to contain_exactly("motd", "overlay:platform")
+        expect(values.reload_status("motd").generation).to eq 1
+        expect { values.on_change("PORT") {} }.to raise_error(ArgumentError)
+
+        seen = []
+        values.on_change("motd") { |_| raise "boom" }
+        values.on_change(:motd) { |v| seen << v }
+        values.on_overlay_change { |v| seen << v["PORT"] }
+
+        write_file(root, "etc/svc/motd/motd.txt", "two!")
+        expect { expect(values.watcher.poll).to eq [:motd] }.to output(/on-change hook for motd raised RuntimeError/).to_stderr
+        expect(values["motd"]).to eq "two!"
+        expect(values.reload_status("motd")).to have_attributes(generation: 2, last_rejected: nil)
+
+        write_file(root, "etc/svc/motd/motd.txt", "")
+        expect { expect(values.watcher.poll).to eq [] }.to output(/reload of motd rejected/).to_stderr
+        expect(values["motd"]).to eq "two!"
+        expect(values.reload_status("motd").last_rejected.to_h).to include(input: "motd")
+
+        write_file(root, "etc/svc/overlay/svc.json", '{"port": 8443}')
+        expect(values.watcher.poll).to eq [:"overlay:platform"]
+        expect(values["PORT"]).to eq 8443
+
+        write_file(root, "etc/svc/overlay/svc.json", '{"port": 0, "x": 1}')
+        expect { expect(values.watcher.poll).to eq [] }.to output(/reload of overlay platform rejected/).to_stderr
+        expect(values["PORT"]).to eq 8443
+        expect(values.reload_status("overlay:platform").last_rejected.codes).to eq [:out_of_range]
+        expect(seen).to eq ["two!", 8443]
+      end
+    end
+
+    it "starts no thread with watch: false, and polls in the background otherwise" do
+      Dir.mktmpdir do |root|
+        write_file(root, "etc/svc/motd/motd.txt", "one")
+        env = {"DOCUCONF_FILE_ROOT" => root, "DOCUCONF_WATCH_INTERVAL" => "0.05"}
+        once = Docuconf::Anyway::Contract.parse(watched_contract).load(env, termination_log: false, watch: false)
+        expect(once.watcher).to be_nil
+        expect(once.reload_status("motd").generation).to eq 1
+
+        values = Docuconf::Anyway::Contract.parse(watched_contract).load(env, termination_log: false, watch: true)
+        begin
+          write_file(root, "etc/svc/motd/motd.txt", "background")
+          deadline = Time.now + 5
+          sleep 0.05 until values["motd"] == "background" || Time.now > deadline
+          expect(values["motd"]).to eq "background"
+          expect(once["motd"]).to eq "one"
+        ensure
+          values.stop_watching
+        end
+      end
+    end
+  end
+
   it "returns typed values, defaults and nil for absent optionals" do
     vars = {
       "PORT" => {"type" => "int", "description" => "Listen port", "default" => 8080},

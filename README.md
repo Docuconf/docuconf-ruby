@@ -105,7 +105,7 @@ CONFIG.webhook_keys.keys                     # => in the platform's order
 
 A `Docuconf::Anyway::KeySet` prints as `[FILTERED]`. Too few or too many keys is `too_few_items` or
 `too_many_items`; a key outside its length bounds, or an empty one (a stray comma), is `out_of_range`, and no
-error shows a key. The generated docs print the rotation steps.
+error shows a key. An empty key is reported by its 1-based position: `old,` gives `key 2 is empty`. The generated docs print the rotation steps.
 
 ### Descriptions and details
 
@@ -148,6 +148,42 @@ puts "listening on #{CONFIG.port}, timeout #{Docuconf::Anyway.format_duration(CO
 `load!` returns the config or, if anything is wrong, prints every problem, writes them to
 `/dev/termination-log` (so `kubectl describe pod` shows them) and exits 1, without a backtrace.
 `OrdersConfig.new` raises `Docuconf::Anyway::ValidationError` instead, a subclass of anyway_config's own.
+
+### Using a watched value
+
+A file input declared `reload: :watch` (`tls_file :serving_tls, path: "/etc/orders/tls", reload: :watch`) is
+re-read when Kubernetes updates it: a background thread polls it every `DOCUCONF_WATCH_INTERVAL` seconds (2 by
+default), and a new value that passes the boot checks replaces the old one. One that fails is logged and the
+old value kept. Anything you build once from the value at boot (a TLS context, an HTTP client, a pool) never
+sees the new one, so the certificate it holds eventually expires. Either read the value on every use, or
+rebuild what you made from it in an on-change hook:
+
+```ruby
+# A TLS server: build the context for each handshake from the current certificate.
+ctx = OpenSSL::SSL::SSLContext.new
+ctx.servername_cb = ->(_socket, _hostname) { CONFIG.serving_tls.ssl_context }
+
+# An HTTP client: rebuild it when the CA bundle changes.
+build_client = ->(ca) { Net::HTTP.new("partner.internal", 443).tap { |h| h.use_ssl = true; h.cert_store = ca.store } }
+partner = build_client.(CONFIG.upstream_ca)
+subscription = CONFIG.on_file_change(:upstream_ca) { |ca| partner = build_client.(ca) }
+subscription.unsubscribe # when the client is gone
+```
+
+Hooks run on the watcher thread, with the new value, after it has replaced the old one, and never for a
+rejected change. You can register several; one that raises is logged by input name and error class (never its
+message, which could quote the value) and the others and the reload go ahead. `on_overlay_change { |config| }`
+does the same for a watched overlay.
+
+`CONFIG.docuconf_reload_status(:upstream_ca)` returns a `Docuconf::Anyway::ReloadStatus` for a health check or a
+metric: `generation` (1 after boot, plus one per accepted reload), `last_reload` (the `Time` of the last
+accepted reload, or `nil`) and `last_rejected` (the last change that failed its checks, as `time`, `input` and
+`codes`, never the content; cleared by a later accepted change). Overlays are keyed `:"overlay:<name>"`; with no
+argument it returns every watched input's status.
+
+A watched keystore is reopened with the password read at boot: the environment does not change in a running
+process, so a reload never reads it again, and a keystore that no longer opens with that password is rejected
+(`keystore_unreadable`) and the old one kept. Rotating a keystore's password needs a rollout.
 
 ## See an error
 

@@ -88,6 +88,18 @@ RSpec.describe "key sets, deprecated inputs and strict parsing" do
       end
     end
 
+    it "names an empty key by its 1-based position, never a key" do
+      k = config do
+        attr_config :api_keys
+        describe :api_keys, "Keys that callers present", type: :key_set, max_keys: 3
+      end
+      {"old-key," => "key 2 is empty", ",new-key" => "key 1 is empty", "a-key,,b-key" => "key 2 is empty"}.each do |raw, msg|
+        e = load_error(k, "API_KEYS" => raw)
+        expect(e.violations.map { |v| [v.input, v.code, v.message] }).to eq([["API_KEYS", :out_of_range, msg]]), raw
+        expect(e.message).not_to include("-key")
+      end
+    end
+
     it "reads min_keys, max_keys and a separator" do
       k = config do
         attr_config :api_keys
