@@ -260,6 +260,89 @@ RSpec.describe "file inputs at boot" do
       end
     end
 
+    it "calls hooks on an accepted change only, survives a raising hook and reports its status" do
+      in_gateway do |root|
+        c = Fixtures::GatewayConfig.new
+        watcher = Docuconf::Anyway::Watcher.new(c, c.class.docuconf_declaration.files.select { |f| f.reload == "watch" })
+        expect(c.docuconf_reload_status(:routes)).to have_attributes(generation: 1, last_reload: nil, last_rejected: nil)
+        expect(c.docuconf_reload_status.keys).to contain_exactly(:routes, :serving_tls, :"overlay:platform")
+        expect { c.docuconf_reload_status(:license) }.to raise_error(ArgumentError, /not a watched input/)
+        expect { c.on_file_change(:license) {} }.to raise_error(ArgumentError, /reload: :watch/)
+
+        seen = []
+        c.on_file_change(:routes) { |_| raise ArgumentError, "boom /v2 secret" }
+        c.on_file_change(:routes) { |v| seen << v["routes"].first["match"] }
+        gone = c.on_file_change(:routes) { |v| seen << :unsubscribed }
+        expect(gone.unsubscribe).to be true
+        expect(gone.unsubscribe).to be false
+
+        before = Time.now
+        expect {
+          write_file(root, "etc/gateway/routes/routes.yaml", "routes:\n  - match: /v2\n    upstream: https://v2\n")
+          expect(watcher.poll).to eq [:routes]
+        }.to output(/on-change hook for routes raised ArgumentError\n/).to_stderr
+        expect(seen).to eq ["/v2"]
+        expect(c.routes["routes"].first["match"]).to eq "/v2"
+        status = c.docuconf_reload_status(:routes)
+        expect(status.generation).to eq 2
+        expect(status.last_reload).to be >= before
+        expect(status.last_rejected).to be_nil
+
+        expect {
+          write_file(root, "etc/gateway/routes/routes.yaml", "routes: []\n# now invalid\n")
+          expect(watcher.poll).to eq []
+        }.to output(/reload of routes rejected/).to_stderr
+        expect(seen).to eq ["/v2"]
+        status = c.docuconf_reload_status(:routes)
+        expect(status.generation).to eq 2
+        expect(status.last_rejected.to_h).to include(input: "routes", codes: [:schema_mismatch])
+        expect(status.last_rejected.time).to be >= status.last_reload
+
+        write_file(root, "etc/gateway/routes/routes.yaml", "routes:\n  - match: /v3\n    upstream: https://v3\n")
+        expect { watcher.poll }.to output.to_stderr
+        expect(seen).to eq ["/v2", "/v3"]
+        expect(c.docuconf_reload_status(:routes)).to have_attributes(generation: 3, last_rejected: nil)
+      end
+    end
+
+    it "reopens a watched keystore with the password read at boot" do
+      in_gateway do |root, pki|
+        klass = Class.new(Anyway::Config) do
+          include Docuconf::Anyway
+          config_name :ks
+          env_prefix "KS"
+          attr_config :keystore_password
+          describe :keystore_password, "Password for the keystore"
+          secret :keystore_password
+          keystore_file :store, path: "/etc/gateway/partner/keystore.p12", description: "A watched keystore",
+            password_var: :keystore_password, reload: :watch
+        end
+        with_env("KS_KEYSTORE_PASSWORD" => "changeit") do
+          c = klass.new
+          watcher = Docuconf::Anyway::Watcher.new(c, klass.docuconf_declaration.files)
+          seen = []
+          c.on_file_change(:store) { |v| seen << v }
+
+          # The same password: accepted.
+          other = make_pki
+          write_file(root, "etc/gateway/partner/keystore.p12",
+            OpenSSL::PKCS12.create("changeit", "partner", other[:key], other[:cert]).to_der)
+          expect(watcher.poll).to eq [:store]
+          expect(c.store.certificate.to_der).to eq other[:cert].to_der
+
+          # A new password, even with the environment changed: rejected, the
+          # previous keystore kept.
+          ENV["KS_KEYSTORE_PASSWORD"] = "rotated"
+          write_file(root, "etc/gateway/partner/keystore.p12",
+            OpenSSL::PKCS12.create("rotated", "partner", pki[:key], pki[:cert]).to_der)
+          expect { expect(watcher.poll).to eq [] }.to output(/\[keystore_unreadable\]/).to_stderr
+          expect(c.store.certificate.to_der).to eq other[:cert].to_der
+          expect(seen.size).to eq 1
+          expect(c.docuconf_reload_status(:store).last_rejected.codes).to eq [:keystore_unreadable]
+        end
+      end
+    end
+
     it "starts a background watcher after a successful load" do
       in_gateway("DOCUCONF_WATCH_INTERVAL" => "0.05") do |root|
         Docuconf::Anyway.watch_files = true

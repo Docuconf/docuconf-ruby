@@ -83,7 +83,7 @@ locking out the sender, without printing a key:
 $ DATABASE_URL=postgres://orders:pw@localhost:5432/orders \
     WEBHOOK_KEYS=old-webhook-key-0123456789abcdef0123, bundle exec ruby server.rb
 docuconf: 1 configuration problem:
-  - WEBHOOK_KEYS [out_of_range]: key 1 is empty (a stray separator?)
+  - WEBHOOK_KEYS [out_of_range]: key 2 is empty
 ```
 
 [`test/webhook_test.rb`](test/webhook_test.rb) walks through a rotation (`bundle exec ruby test/webhook_test.rb`),

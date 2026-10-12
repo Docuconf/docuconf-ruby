@@ -27,7 +27,7 @@ module Docuconf
       OVERLAY_FORMATS = %w[json yaml toml].freeze
 
       # An overlay of a contract (SPEC §4.7).
-      ContractOverlay = Struct.new(:name, :format, :path, :key_separator, keyword_init: true)
+      ContractOverlay = Struct.new(:name, :format, :path, :key_separator, :reload, keyword_init: true)
 
       attr_reader :vars, :files, :overlays, :profiles
 
@@ -81,7 +81,19 @@ module Docuconf
       #
       # With termination_log: true (the default), a failure is also written
       # where Kubernetes reports it, as at boot.
-      def load(env = ENV, termination_log: true)
+      #
+      # Inputs the contract declares reload: watch (files and overlays) are
+      # reloaded as in the declaration path: a background thread polls them
+      # every DOCUCONF_WATCH_INTERVAL seconds and, when one changes and
+      # passes its checks again, replaces its entry in the returned Hash
+      # (for an overlay, every variable's) and calls the hooks registered
+      # with Loaded#on_change / #on_overlay_change. A change that fails is
+      # logged and the previous value kept. The environment is read once,
+      # here: a reload reuses it, keystore passwords included. watch: false
+      # (or Docuconf::Anyway.watch_files = false) loads once and starts no
+      # thread; Loaded#reload_status still reports generation 1.
+      def load(env = ENV, termination_log: true, watch: Docuconf::Anyway.watch_files)
+        env = env.to_h.freeze
         values, violations = evaluate(env)
         unless violations.empty?
           error = ValidationError.new(violations)
@@ -89,23 +101,67 @@ module Docuconf
           raise error
         end
         out = Loaded.new
+        store(out, values)
+        out.secret_names = vars.select(&:secret).map(&:name) + files.select(&:secret).map(&:name)
+        start_watching(out, env, watch)
+        out
+      end
+
+      # Writes evaluated values into a Loaded, as the app receives them.
+      def store(out, values)
         values.each do |name, v|
           decl = var(name)
           out[name] = decl && !v.nil? ? Values.host_value(decl, v) : v
         end
-        out.secret_names = vars.select(&:secret).map(&:name) + files.select(&:secret).map(&:name)
         out
       end
 
       # The values Contract#load returns: a Hash whose #inspect and pp show
-      # secret values as [FILTERED].
+      # secret values as [FILTERED]. Entries for reload: watch inputs are
+      # replaced in place when the input changes, so read them on every use.
       class Loaded < Hash
         attr_writer :secret_names
+        attr_accessor :reloads, :watcher
 
         def inspect = filtered.inspect
         alias_method :to_s, :inspect
 
         def pretty_print(q) = q.pp(filtered)
+
+        # Calls the block with the new value after the watched file input
+        # `name` changes, passes its checks and replaces the old value; never
+        # for a rejected change. Returns a Subscription.
+        def on_change(name, &block)
+          name = name.to_s
+          unless reloads&.watched?(name)
+            raise ArgumentError, "#{name} is not a file input declared reload: watch"
+          end
+
+          reloads.subscribe(name, block)
+        end
+
+        # Calls the block with these values after a watched overlay changes
+        # and the contract, evaluated again, passes. Returns a Subscription.
+        def on_overlay_change(&block)
+          raise ArgumentError, "the contract declares no overlay with reload: watch" unless reloads&.keys&.any? { |k| k.start_with?("overlay:") }
+
+          reloads.subscribe(:overlays, block)
+        end
+
+        # The ReloadStatus of a watched input (a file by name, an overlay as
+        # "overlay:<name>"), or with no argument every watched input's.
+        def reload_status(name = nil)
+          return(reloads ? reloads.all : {}) if name.nil?
+          raise ArgumentError, "#{name} is not a watched input (reload: watch)" unless reloads
+
+          reloads.status(name.to_s)
+        end
+
+        # Stops the background reload thread, if any.
+        def stop_watching
+          watcher&.stop
+          self
+        end
 
         private
 
@@ -187,6 +243,20 @@ module Docuconf
       end
 
       private
+
+      def start_watching(out, env, watch)
+        watched_files = files.select { |f| f.reload == "watch" }
+        watched_overlays = overlays.select { |o| o.reload == "watch" }
+        return if watched_files.empty? && watched_overlays.empty?
+
+        out.reloads = Reloads.new(watched_files.map(&:name) + watched_overlays.map { |o| "overlay:#{o.name}" })
+        return unless watch
+
+        interval = Float(env.fetch("DOCUCONF_WATCH_INTERVAL", Watcher::DEFAULT_INTERVAL))
+        passwords = watched_files.to_h { |f| [f.accessor, keystore_password(f, env)] }
+        out.watcher = ContractWatcher.new(self, out, watched_files, overlays: watched_overlays, env: env,
+          interval: interval, passwords: passwords).start
+      end
 
       def violation(var, failure, source = nil)
         Violation.new(input: var.name, kind: :var, code: failure.code, message: "#{failure.message}#{source}")
@@ -478,7 +548,7 @@ module Docuconf
           return nil
         end
         o = ContractOverlay.new(name: name.to_s, format: h["format"].to_s, path: h["path"].to_s,
-          key_separator: h["keySeparator"].to_s)
+          key_separator: h["keySeparator"].to_s, reload: (h["reload"] || "restart").to_s)
         problems << "#{label}: name must be a DNS label" unless INPUT_NAME_RE.match?(o.name)
         problems << "#{label}: format must be json, yaml or toml" unless OVERLAY_FORMATS.include?(o.format)
         if !ABS_PATH_RE.match?(o.path) || o.path.split("/").any? { |p| p == "." || p == ".." } ||

@@ -72,7 +72,8 @@ default the upcased `config_name`) + `_` + the upcased attribute, so `:port` in 
   every key without stopping at the first match. It prints as `[FILTERED]` in `#inspect`, `#to_s`, `pp` and
   JSON. Fewer than `min_keys` or more than `max_keys` keys is `too_few_items`/`too_many_items`; a key outside
   `key_min_length`..`key_max_length`, and an empty key whatever the bounds (a stray separator), is
-  `out_of_range`. Errors give positions and lengths, never a key. Generated docs print the rotation steps.
+  `out_of_range`; an empty key's message is `key N is empty`, N its 1-based position (`old,` gives `key 2 is
+  empty`, `,new` gives `key 1 is empty`). Errors give positions and lengths, never a key. Generated docs print the rotation steps.
 - **Deprecated** (SPEC §4.2): `deprecated: "Use PORT instead"` or `deprecated: {message:, replaced_by:}`, on a
   variable or a file input. The message must not be blank and is at most 500 characters, and a required input
   cannot be deprecated (both a `DeclarationError`). At boot, a deprecated input that is set still loads and is
@@ -289,7 +290,10 @@ Checks at boot (SPEC §11.2 item 7):
 
 `reload: :watch` inputs are re-read when they change: a background thread polls each input's directory
 (Kubernetes swaps a `..data` symlink) every 2 seconds (`DOCUCONF_WATCH_INTERVAL`). A reload that fails its
-checks is logged and the previous value kept. React with `config.on_file_change(:serving_tls) { |tls| ... }`.
+checks is logged and the previous value kept. React with `config.on_file_change(:serving_tls) { |tls| ... }`,
+which returns a `Subscription` (`#unsubscribe`); `config.docuconf_reload_status(:serving_tls)` reports
+`generation`, `last_reload` and `last_rejected`. A keystore is reopened with the password read at boot, so
+rotating its password needs a rollout. See [Using a watched value](../README.md#using-a-watched-value).
 Threads do not survive `fork`, so docuconf restarts the watchers in every forked child (`Process._fork`): Puma
 cluster workers with `preload_app!`, Unicorn and Resque workers keep reloading. For a fork docuconf cannot see,
 call `Docuconf::Anyway.restart_watchers!` in the child.
@@ -326,6 +330,13 @@ The contract's `files`, `profiles` and `overlays` apply too, read from under `DO
   type to the wire string and checked exactly like an env value; a missing overlay is fine, and one that does not
   parse or does not hold an object is `file_malformed` for the overlay.
 - **Deprecated** inputs that are set log a warning, as at boot.
+- **`reload: watch`** files and overlays are reloaded as in the declaration path: a background thread polls
+  them, and a change that passes its checks replaces its entry in the returned Hash (an overlay change
+  evaluates the contract again against the environment read at load, keystore passwords included). Read the
+  entry on every use, or register `values.on_change("serving-tls") { |tls| ... }` (or
+  `values.on_overlay_change { |values| ... }`), which returns a `Subscription`. `values.reload_status("serving-tls")`
+  (an overlay as `"overlay:<name>"`) reports `generation`, `last_reload` and `last_rejected`.
+  `load(env, watch: false)` starts no thread; `values.stop_watching` stops it.
 
 
 ## Error codes

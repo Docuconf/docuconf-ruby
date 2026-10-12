@@ -354,7 +354,7 @@ module Docuconf
         keys.each_with_index do |k, i|
           n = char_length(k)
           if n.zero?
-            out << Failure.new(:out_of_range, "key #{i} is empty (a stray separator?)")
+            out << Failure.new(:out_of_range, "key #{i + 1} is empty")
           elsif c[:key_min_length] && n < c[:key_min_length]
             out << Failure.new(:out_of_range, "key #{i} is #{n} characters, below keyMinLength #{c[:key_min_length]}")
           elsif c[:key_max_length] && n > c[:key_max_length]

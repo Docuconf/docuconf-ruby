@@ -16,6 +16,7 @@ require_relative "anyway/dsl"
 require_relative "anyway/tls"
 require_relative "anyway/files"
 require_relative "anyway/overlays"
+require_relative "anyway/reloads"
 require_relative "anyway/watcher"
 require_relative "anyway/hints"
 require_relative "anyway/validator"
@@ -287,26 +288,47 @@ module Docuconf
         @docuconf_overlay_value_failures ||= {}
       end
 
-      # Calls the block with the config whenever a watched overlay changes
-      # and its new values pass validation.
+      # Calls the block with the config after a watched overlay changes and
+      # the config, loaded again, passes validation. Never for a rejected
+      # change. Returns a Subscription (#unsubscribe removes the hook).
       def on_overlay_change(&block)
-        docuconf_overlay_listeners << block
-        self
+        docuconf_reloads.subscribe(:overlays, block)
       end
 
-      def docuconf_overlay_listeners
-        @docuconf_overlay_listeners ||= []
-      end
-
-      # Calls the block with the new value whenever a watched file input is
-      # reloaded successfully.
+      # Calls the block with the new value after a watched file input
+      # (reload: :watch) changes, passes its boot checks and replaces the
+      # old value; never for a rejected change. The background watcher
+      # polls every DOCUCONF_WATCH_INTERVAL seconds, so hooks fire without
+      # a read. Several hooks may be registered; one that raises is logged
+      # by input name and error class, and the others and the reload still
+      # go ahead. Returns a Subscription (#unsubscribe removes the hook).
+      #
+      #   config.on_file_change(:serving_tls) { |tls| server.ssl_context = tls.ssl_context }
       def on_file_change(accessor, &block)
-        (docuconf_listeners[accessor.to_sym] ||= []) << block
-        self
+        accessor = accessor.to_sym
+        unless docuconf_reloads.watched?(accessor)
+          raise ArgumentError, "#{accessor} is not a file input declared reload: :watch"
+        end
+
+        docuconf_reloads.subscribe(accessor, block)
       end
 
-      def docuconf_listeners
-        @docuconf_listeners ||= {}
+      # The reload status of a watched input, as a ReloadStatus (generation,
+      # last_reload, last_rejected): a file input by accessor, an overlay as
+      # :"overlay:<name>". With no argument, every watched input's status by
+      # key. For a health check or a metric.
+      def docuconf_reload_status(input = nil)
+        input.nil? ? docuconf_reloads.all : docuconf_reloads.status(input.to_sym)
+      end
+
+      # The hooks and status of this config's watched inputs.
+      def docuconf_reloads
+        @docuconf_reloads ||= begin
+          decl = self.class.docuconf_declaration
+          keys = decl.files.select { |f| f.reload == "watch" }.map(&:accessor) +
+            decl.overlays.select { |o| o.reload == "watch" }.map { |o| :"overlay:#{o.name}" }
+          Reloads.new(keys)
+        end
       end
 
       def load(overrides = nil)
@@ -452,6 +474,7 @@ module Docuconf
           end
           raise error
         end
+        docuconf_reloads
         return if docuconf_isolated?
 
         Watcher.start(self) if Docuconf::Anyway.watch_files && !Thread.current[:docuconf_no_watch]

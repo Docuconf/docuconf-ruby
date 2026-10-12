@@ -224,10 +224,15 @@ RSpec.describe "config-file overlays" do
         }.to output(/reload of overlay platform rejected.*OVL_PORT \[out_of_range\]/).to_stderr
         expect(c.port).to eq 9090
         expect(File.exist?(File.join(root, "termination-log"))).to be false
+        status = c.docuconf_reload_status(:"overlay:platform")
+        expect(status.generation).to eq 2
+        expect(status.last_rejected.to_h).to include(input: "platform", codes: [:out_of_range])
 
         File.delete(File.join(root, OVERLAY))
         expect(watcher.poll).to eq [:"overlay:platform"]
         expect([c.port, c.log_level]).to eq [80, "info"]
+        expect(c.docuconf_reload_status(:"overlay:platform")).to have_attributes(generation: 3, last_rejected: nil)
+        expect(seen).to eq [9090, 80]
       end
     end
 

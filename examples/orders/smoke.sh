@@ -68,7 +68,7 @@ status=0
 DATABASE_URL="$secret" WEBHOOK_KEYS="$old_key," bundle exec ruby server.rb >"$tmp/bad.txt" 2>&1 || status=$?
 cat >"$tmp/want.txt" <<'WANT'
 docuconf: 1 configuration problem:
-  - WEBHOOK_KEYS [out_of_range]: key 1 is empty (a stray separator?)
+  - WEBHOOK_KEYS [out_of_range]: key 2 is empty
 WANT
 if [ "$status" != 1 ] || ! diff -u "$tmp/want.txt" "$tmp/bad.txt" || grep -q webhook-key "$tmp/bad.txt"; then
   echo "want exit 1 for an empty webhook key, got $status:" >&2; cat "$tmp/bad.txt" >&2; exit 1
