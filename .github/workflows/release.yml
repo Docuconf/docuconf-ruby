@@ -18,7 +18,7 @@ jobs:
       contents: write # rake release (run by release-gem) pushes the tag if it is missing
       id-token: write # OIDC token for RubyGems trusted publishing
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -50,7 +50,7 @@ jobs:
       contents: write # create the GitHub Release and upload its assets
       packages: write # push to rubygems.pkg.github.com
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
