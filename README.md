@@ -345,12 +345,17 @@ DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONF
 ```
 
 No capability tags are skipped, and none may be: the runner keeps an allow-list of the tags this SDK supports
-(`int64`, `json-schema`, `key-set`, `deprecated`, `strict-parsing`, `files`, `profiles`, `overlays`), skips a
+(`int64`, `json-schema`, `key-set`, `deprecated`, `strict-parsing`, `files`, `profiles`, `overlays`,
+`required-if`, `roles`), skips a
 case with any other tag rather than run it, and fails when anything was skipped. Ruby's `Integer` holds every
 64-bit value, `json` values are validated against their JSON Schema, and contract-first mode reads key sets,
 deprecated inputs, file inputs (TOML through the `tomlrb` gem; PKCS#12 keystores through Ruby's OpenSSL),
-profiles and overlays, with the strict parsing rules. Each case runs with its files written under a fresh
-`DOCUCONF_FILE_ROOT`.
+profiles, overlays, `requiredIf` and roles, with the strict parsing rules. Each case runs with its files
+written under a fresh `DOCUCONF_FILE_ROOT`.
+
+The same spec also runs `conformance/cases.pending.json`, next to `cases.json`: cases for features not every SDK
+has yet, tagged with a transitional tag (`required-if`, `roles`). A pending case whose tags are all supported
+must pass; one with any other tag is skipped without failing, and a missing file skips the pending run.
 
 `spec/export_fixture_spec.rb` declares docuconf-go's shared export fixture (`conformance/export/fixture.yaml`)
 in [`spec/fixtures/export_fixture.rb`](spec/fixtures/export_fixture.rb), exports it and compares it with

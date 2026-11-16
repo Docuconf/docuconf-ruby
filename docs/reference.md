@@ -337,6 +337,23 @@ The contract's `files`, `profiles` and `overlays` apply too, read from under `DO
   `values.on_overlay_change { |values| ... }`), which returns a `Subscription`. `values.reload_status("serving-tls")`
   (an overlay as `"overlay:<name>"`) reports `generation`, `last_reload` and `last_rejected`.
   `load(env, watch: false)` starts no thread; `values.stop_watching` stops it.
+- **`requiredIf`** (SPEC §4.2.1), on a variable or a file input, makes it required while one other variable
+  has one value: `"requiredIf": {"TLS_ENABLED": true}`. The condition is checked on that variable's loaded
+  value (the environment, else an overlay, the selected profile's default or its own default), so a profile
+  can turn it on; a condition variable with a violation of its own makes nothing required. A missing variable
+  is `missing_required`, `is required when TLS_ENABLED is true` (the value as JSON: `LOG_FORMAT is "json"`),
+  and a missing file `file_missing`, with `, and is required when ...` after the usual message. The contract
+  is rejected when the condition names the input itself, an undeclared or secret variable, one that is not a
+  `string`, `int`, `bool` or `enum`, or a value it cannot hold, and when the input is `required`, has a
+  `default` or is `deprecated`. `contract.var("LOG_SCHEMA_URL").required_if` is a `Contract::RequiredIf`
+  (`var`, `value`).
+- **`roles`** (SPEC §4.9): `DOCUCONF_ROLE` names the workload's role, and must be declared as a required
+  `enum` whose values are the contract's `roles`. An input with `roles` is required only in those roles; with
+  `DOCUCONF_ROLE` unset or not a role (`missing_required`, `not_in_enum`), no input with `roles` is required.
+  `contract.roles` lists the roles and `contract.role(env)` is the role in effect, or `nil`. Input roles
+  must be among the contract's.
+- **`includes`** (SPEC §4.8) is read and checked (`name@major`, none twice) and exposed as
+  `contract.includes`; the fragments' variables are already inline in `vars`, and load like any other.
 
 
 ## Error codes
