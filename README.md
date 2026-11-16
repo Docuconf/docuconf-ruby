@@ -15,7 +15,11 @@ one `describe` line per attribute. docuconf then:
    deploys.
 
 > Status: v0.1, implementing [spec v1alpha1](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md).
-> Expect breaking changes until v1. Example app: [`examples/orders`](examples/orders).
+> Expect breaking changes until v1. Example apps:
+> - [`examples/orders`](examples/orders): a declared config class, its exported contract and generated docs;
+>   a key set rotation.
+> - [`examples/shop`](examples/shop): a hand-written contract in [contract-first mode](docs/reference.md#contract-first-mode),
+>   with roles, `requiredIf` and the `otel@1` fragment.
 
 1. [Install](#install)
 2. [Declare](#declare)

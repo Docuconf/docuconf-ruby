@@ -175,3 +175,82 @@ jobs:
 
       - name: Smoke test
         run: ./smoke.sh
+
+  example-shop:
+    # examples/shop: roles, requiredIf and the otel@1 fragment in
+    # contract-first mode. Runs the test matrix and the smoke test against
+    # the SDK in this repository, checks contract.cue matches contract.json,
+    # vets both, and checks the generated docs.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/shop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick the docuconf-go ref
+        id: dcref
+        # This job's run steps default to examples/shop.
+        working-directory: ${{ github.workspace }}
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.docuconf_go_ref }}
+        run: |
+          if [ "$EVENT" = schedule ]; then echo "ref=main" >> "$GITHUB_OUTPUT"
+          elif [ -n "$INPUT_REF" ]; then echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          else echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"; fi
+      - name: Check out docuconf-go
+        uses: actions/checkout@v4
+        with:
+          repository: docuconf/docuconf-go
+          path: docuconf-go
+          ref: ${{ steps.dcref.outputs.ref }}
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: examples/shop
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install cue
+        run: go install cuelang.org/go/cmd/cue@v0.17.1
+
+      - name: Build
+        run: bundle exec ruby -c shop.rb
+
+      # The README's test matrix, cases 1 to 11.
+      - name: Test
+        run: bundle exec ruby test/shop_test.rb
+
+      # contract.json is the source; contract.cue is written from it.
+      - name: contract.cue is up to date
+        run: |
+          ./contract-cue.sh
+          ../../scripts/check-generated.sh contract.cue
+
+      - name: Contract passes cue vet
+        run: |
+          vet="$RUNNER_TEMP/vet"
+          mkdir -p "$vet/shop"
+          cp -r "$GITHUB_WORKSPACE/docuconf-go/spec/cue/cue.mod" "$GITHUB_WORKSPACE/docuconf-go/spec/cue/contract" "$vet/"
+          cp contract.cue "$vet/shop/"
+          cp contract.json "$vet/"
+          cd "$vet" && cue vet -c ./shop && cue vet -c ./shop contract.json
+
+      # CONFIG.md, CONFIG.agents.md and docs.json are generated from the
+      # contract by docuconf docs, built from the docuconf-go checkout; they
+      # must match what it writes today. These are the README's commands.
+      - name: Generated docs are up to date
+        run: |
+          (cd "$GITHUB_WORKSPACE/docuconf-go/cmd/docuconf" && go build -o "$RUNNER_TEMP/docuconf" .)
+          "$RUNNER_TEMP/docuconf" docs contract.json --check CONFIG.md
+          "$RUNNER_TEMP/docuconf" docs contract.json --format agents --check CONFIG.agents.md
+          "$RUNNER_TEMP/docuconf" docs contract.json --format model --check docs.json
+
+      - name: Smoke test
+        run: ./smoke.sh

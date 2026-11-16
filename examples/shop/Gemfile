@@ -1,0 +1,10 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+# The SDK from this repository, not a published version.
+gem "docuconf-anyway", path: "../.."
+
+group :test do
+  gem "minitest", ">= 5.20"
+end
