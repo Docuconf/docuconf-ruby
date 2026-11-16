@@ -9,6 +9,11 @@ require "fileutils"
 # from DOCUCONF_CONFORMANCE, falling back to a docuconf-go checkout next to
 # this repository. A missing file skips the suite, unless
 # DOCUCONF_REQUIRE_CONFORMANCE=1.
+#
+# The pending cases (conformance/cases.pending.json, next to cases.json) are
+# for features not every SDK has yet. They run too: a case whose tags are all
+# supported must pass, a case with a tag this SDK does not support is
+# skipped, and a missing file skips the whole pending run.
 module Conformance
   # The capability tags (conformance/README.md) this SDK supports. It is an
   # allow-list: a case needing a tag that is not here, including one this
@@ -16,7 +21,9 @@ module Conformance
   # every 64-bit integer and validates json values against their JSON
   # Schema, and contract-first mode has key sets, deprecated inputs, strict
   # parsing, file inputs, profiles and overlays, so no case is skipped.
-  SUPPORTED_TAGS = %w[int64 json-schema key-set deprecated strict-parsing files profiles overlays].freeze
+  # required-if and roles are transitional tags of the pending cases.
+  SUPPORTED_TAGS = %w[int64 json-schema key-set deprecated strict-parsing files profiles overlays required-if
+    roles].freeze
 
   def self.path
     env = ENV["DOCUCONF_CONFORMANCE"]
@@ -25,9 +32,12 @@ module Conformance
     File.expand_path("../../docuconf-go/conformance/cases.json", __dir__)
   end
 
+  # cases.pending.json, next to cases.json.
+  def self.pending_path = File.join(File.dirname(path), "cases.pending.json")
+
   def self.required? = ENV["DOCUCONF_REQUIRE_CONFORMANCE"] == "1"
 
-  def self.cases
+  def self.cases(path = self.path)
     return nil unless File.file?(path)
 
     suite = JSON.parse(File.read(path, encoding: "UTF-8"))
@@ -84,9 +94,65 @@ module Conformance
 
     actual == expected
   end
+
+  # Runs one case in an example.
+  module Runner
+    def run_case(c)
+      Dir.mktmpdir("docuconf-conformance") do |tmp|
+        # Files go under a fresh, empty DOCUCONF_FILE_ROOT, set for every
+        # case, so that no case reads the machine's own files.
+        root = File.join(tmp, "root")
+        FileUtils.mkdir_p(root)
+        Conformance.write_files(root, c["files"])
+        log = File.join(tmp, "termination-log")
+        contract = Docuconf::Anyway::Contract.parse(c["contract"])
+        env = c["env"].merge("DOCUCONF_FILE_ROOT" => root)
+        id = "#{c["id"]} (#{c["source"]})"
+
+        with_env("DOCUCONF_TERMINATION_LOG" => log) do
+          if c.key?("expect")
+            values = contract.load(env)
+            c["expect"].each do |name, expected|
+              if (var = contract.var(name))
+                actual = Conformance.to_json_value(var, values[name])
+                ok = Conformance.same?(var, actual, expected)
+              elsif (file = contract.file(name))
+                actual = Conformance.file_json_value(file, values[name])
+                ok = expected.nil? ? actual.nil? : Conformance.same_data?(actual, expected)
+              else
+                raise "#{id}: #{name} is not in the contract"
+              end
+              expect(ok).to be(true), "#{id}: #{name} is #{actual.inspect}, expected #{expected.inspect}"
+            end
+          else
+            error = nil
+            begin
+              contract.load(env)
+            rescue Docuconf::Anyway::ValidationError => e
+              error = e
+            end
+            expect(error).not_to be_nil, "#{id}: loading succeeded, expected #{c["errors"].inspect}"
+            got = error.violations.map { |v| [v.input, v.code.to_s] }
+            want = c["errors"].map { |x| [x["var"], x["code"]] }
+            expect(got).to match_array(want), "#{id}: got #{got.inspect}, expected #{want.inspect}"
+
+            written = File.exist?(log) ? File.read(log) : ""
+            contract.vars.select(&:secret).each do |var|
+              c["env"].select { |k, v| (k == var.name || k.start_with?("#{var.name}__")) && !v.empty? }.each_value do |raw|
+                expect(error.message).not_to include(raw), "#{id}: the error message shows #{var.name}"
+                expect(written).not_to include(raw), "#{id}: the termination log shows #{var.name}"
+              end
+            end
+          end
+        end
+      end
+    end
+  end
 end
 
 RSpec.describe "conformance suite" do
+  include Conformance::Runner
+
   cases = Conformance.cases
 
   if cases.nil?
@@ -111,55 +177,34 @@ RSpec.describe "conformance suite" do
     end
 
     (cases - skipped).each do |c|
-      it c["id"] do
-        Dir.mktmpdir("docuconf-conformance") do |tmp|
-          # Files go under a fresh, empty DOCUCONF_FILE_ROOT, set for every
-          # case, so that no case reads the machine's own files.
-          root = File.join(tmp, "root")
-          FileUtils.mkdir_p(root)
-          Conformance.write_files(root, c["files"])
-          log = File.join(tmp, "termination-log")
-          contract = Docuconf::Anyway::Contract.parse(c["contract"])
-          env = c["env"].merge("DOCUCONF_FILE_ROOT" => root)
-          id = "#{c["id"]} (#{c["source"]})"
+      it(c["id"]) { run_case(c) }
+    end
+  end
+end
 
-          with_env("DOCUCONF_TERMINATION_LOG" => log) do
-            if c.key?("expect")
-              values = contract.load(env)
-              c["expect"].each do |name, expected|
-                if (var = contract.var(name))
-                  actual = Conformance.to_json_value(var, values[name])
-                  ok = Conformance.same?(var, actual, expected)
-                elsif (file = contract.file(name))
-                  actual = Conformance.file_json_value(file, values[name])
-                  ok = expected.nil? ? actual.nil? : Conformance.same_data?(actual, expected)
-                else
-                  raise "#{id}: #{name} is not in the contract"
-                end
-                expect(ok).to be(true), "#{id}: #{name} is #{actual.inspect}, expected #{expected.inspect}"
-              end
-            else
-              error = nil
-              begin
-                contract.load(env)
-              rescue Docuconf::Anyway::ValidationError => e
-                error = e
-              end
-              expect(error).not_to be_nil, "#{id}: loading succeeded, expected #{c["errors"].inspect}"
-              got = error.violations.map { |v| [v.input, v.code.to_s] }
-              want = c["errors"].map { |x| [x["var"], x["code"]] }
-              expect(got).to match_array(want), "#{id}: got #{got.inspect}, expected #{want.inspect}"
+# The pending cases: run those whose tags this SDK supports; skip the rest,
+# and the whole run when the file is missing.
+RSpec.describe "conformance suite, pending cases" do
+  include Conformance::Runner
 
-              written = File.exist?(log) ? File.read(log) : ""
-              contract.vars.select(&:secret).each do |var|
-                c["env"].select { |k, v| (k == var.name || k.start_with?("#{var.name}__")) && !v.empty? }.each_value do |raw|
-                  expect(error.message).not_to include(raw), "#{id}: the error message shows #{var.name}"
-                  expect(written).not_to include(raw), "#{id}: the termination log shows #{var.name}"
-                end
-              end
-            end
-          end
-        end
+  cases = Conformance.cases(Conformance.pending_path)
+
+  if cases.nil?
+    it "runs the cases in #{Conformance.pending_path}" do
+      skip "#{Conformance.pending_path} not found"
+    end
+  else
+    skipped = cases.select { |c| Conformance.skip?(c) }
+    it "reads #{cases.size} pending cases (#{skipped.size} skipped)" do
+      $stdout.puts "\nconformance: #{cases.size} pending cases in #{Conformance.pending_path}, #{skipped.size} skipped"
+      expect(cases).to be_an(Array)
+    end
+
+    cases.each do |c|
+      if Conformance.skip?(c)
+        it(c["id"]) { skip "needs unsupported tags #{Array(c["requires"]) - Conformance::SUPPORTED_TAGS}" }
+      else
+        it(c["id"]) { run_case(c) }
       end
     end
   end

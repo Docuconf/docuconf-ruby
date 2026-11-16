@@ -21,6 +21,13 @@ module Docuconf
     # variable's default, then the selected profile's default, then an
     # overlay, then the environment. Problems raise ValidationError listing
     # all of them; a malformed contract raises DeclarationError.
+    #
+    # Conditional requirements (SPEC §4.2.1, `requiredIf`) are checked on
+    # the condition variable's loaded value, after every layer. With roles
+    # (SPEC §4.9), DOCUCONF_ROLE names the workload's role: an input whose
+    # `roles` leave it out is optional, and with no valid role every input
+    # that has `roles` is. `includes` (SPEC §4.8) is read and exposed; the
+    # fragments' variables are already inline in `vars`.
     class Contract
       LIST_ENCODINGS = %w[csv json indexed].freeze
       DURATION_ENCODINGS = %w[go iso8601 seconds timespan].freeze
@@ -29,7 +36,29 @@ module Docuconf
       # An overlay of a contract (SPEC §4.7).
       ContractOverlay = Struct.new(:name, :format, :path, :key_separator, :reload, keyword_init: true)
 
-      attr_reader :vars, :files, :overlays, :profiles
+      # A `requiredIf: {VAR: value}` condition (SPEC §4.2.1): the input is
+      # required while variable `var` has `value`. #to_s is the condition
+      # as messages write it, the value as JSON: `LOG_FORMAT is "json"`.
+      RequiredIf = Struct.new(:var, :value) do
+        def to_s = "#{var} is #{JSON.generate(value)}"
+
+        # Whether a loaded value meets the condition. A bool never equals
+        # an int.
+        def holds?(loaded) = !loaded.nil? && loaded.class == value.class && loaded == value
+      end
+
+      # The variable that names the workload's role (SPEC §4.9).
+      ROLE_VAR = "DOCUCONF_ROLE"
+      # The types a requiredIf condition variable can have: they compare as
+      # written (SPEC §4.2.1).
+      CONDITION_TYPES = %w[string int bool enum].freeze
+      ROLE_RE = /\A[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\z/
+      FRAGMENT_RE = /\A[a-z][a-z0-9-]*@[1-9][0-9]*\z/
+      private_constant :ROLE_RE, :FRAGMENT_RE
+
+      # `includes` is the well-known fragments the contract includes (SPEC
+      # §4.8), as `name@major`; `roles` its roles (SPEC §4.9), or nil.
+      attr_reader :vars, :files, :overlays, :profiles, :includes, :roles
 
       # Accepts the contract as JSON text or as a Hash.
       def self.parse(contract)
@@ -64,12 +93,24 @@ module Docuconf
         @overlays = overlays.is_a?(Hash) ? overlays.sort.filter_map { |name, h| build_overlay(name, h, problems) } : []
         @profiles = data["profiles"]
         check_profiles(problems) if @profiles
+        @includes = read_includes(data["includes"], problems)
+        @roles = read_roles(data["roles"], "", problems)
+        check_roles(problems)
+        check_conditions(problems)
         raise DeclarationError, problems unless problems.empty?
       end
 
       def var(name) = vars.find { |v| v.name == name }
 
       def file(name) = files.find { |f| f.name == name }
+
+      # The workload's role (SPEC §4.9): DOCUCONF_ROLE in `env` when it is
+      # one of the contract's roles, else nil (no roles, unset, or another
+      # value, which the load reports as the one problem about roles).
+      def role(env = ENV)
+        r = env.to_h[ROLE_VAR]
+        roles&.include?(r) ? r : nil
+      end
 
       # Validates `env` (a Hash of String to String; the process environment
       # by default) and returns the typed values by variable name: nil for an
@@ -180,6 +221,7 @@ module Docuconf
         root = nil if root&.empty?
         violations = []
         profile = selected_profile(env)
+        role = role(env)
         layers = overlay_layers(env, root, violations)
         found = {}
         vars.each do |var|
@@ -225,15 +267,28 @@ module Docuconf
           next if found[var.name] == :failed
 
           value = found.fetch(var.name) { fallback(var, profile) }
-          if value.nil? && var.required
+          if value.nil? && var.required && in_role?(var, role)
             violations << Violation.new(input: var.name, kind: :var, code: :missing_required, message: "required, and not set")
           end
           values[var.name] = value
         end
+        # Conditional requirements, on the loaded values: a condition
+        # variable with a violation of its own is not in `values`, so it
+        # makes nothing required.
+        vars.each do |var|
+          next unless values.key?(var.name) && values[var.name].nil?
+          next unless (cond = condition(var, role, values))
+
+          violations << Violation.new(input: var.name, kind: :var, code: :missing_required, message: "is required when #{cond}")
+        end
 
         files.each do |f|
-          value, failures = Files.load(f, env: env, password: keystore_password(f, env), now: now)
-          failures.each { |x| violations << Violation.new(input: f.name, kind: :file, code: x.code, message: x.message) }
+          decl, cond = effective_file(f, role, values)
+          value, failures = Files.load(decl, env: env, password: keystore_password(f, env), now: now)
+          failures.each do |x|
+            message = cond && x.code == :file_missing ? "#{x.message}, and is required when #{cond}" : x.message
+            violations << Violation.new(input: f.name, kind: :file, code: x.code, message: message)
+          end
           if f.deprecated && failures.empty? && !value.nil?
             Docuconf::Anyway.warn(Validator.deprecated_message("file #{f.name}", f.deprecated))
           end
@@ -245,7 +300,10 @@ module Docuconf
       private
 
       def start_watching(out, env, watch)
-        watched_files = files.select { |f| f.reload == "watch" }
+        # A reload checks a file as this load did: required or not by the
+        # role and its condition.
+        role = role(env)
+        watched_files = files.select { |f| f.reload == "watch" }.map { |f| effective_file(f, role, out).first }
         watched_overlays = overlays.select { |o| o.reload == "watch" }
         return if watched_files.empty? && watched_overlays.empty?
 
@@ -299,6 +357,31 @@ module Docuconf
 
       INDEX_RE = /\A(?:0|[1-9][0-9]*)\z/
       private_constant :INDEX_RE
+
+      # Whether `role` uses an input (SPEC §4.9): an input with no roles is
+      # used in every role, and one with roles in no role when there is
+      # none.
+      def in_role?(input, role) = input.roles.nil? || input.roles.include?(role)
+
+      # The input's requiredIf when it holds on `values` (the loaded
+      # variables) and the role uses the input; else nil.
+      def condition(input, role, values)
+        cond = input.required_if
+        return nil unless cond && in_role?(input, role) && values.key?(cond.var)
+
+        cond.holds?(values[cond.var]) ? cond : nil
+      end
+
+      # A file input as this load checks it, and the condition that makes
+      # it required, if any: optional when its role does not use it,
+      # required when its requiredIf holds.
+      def effective_file(file, role, values)
+        return [file.with_required(false), nil] unless in_role?(file, role)
+        return [file, nil] if file.required
+
+        cond = condition(file, role, values)
+        cond ? [file.with_required(true), cond] : [file, nil]
+      end
 
       # The default when a variable is unset: the selected profile's, then
       # the variable's own.
@@ -471,11 +554,14 @@ module Docuconf
         details = h["details"]&.to_s
         Docs.check(label, details, problems)
         deprecated = contract_deprecated(label, h, problems, kind: :var)
+        required_if = read_required_if(label, h, problems)
+        roles = read_roles(h["roles"], "#{label}: ", problems)
         var = VarDecl.new(
           attr: label.to_sym, name: label, type: type, description: h["description"].to_s, details: details,
           secret: h["secret"] == true, required: h["required"] == true, default: h["default"],
           constraints: constraints, items: items, regexp: regexp, encoding: encoding,
-          separator: h["separator"]&.to_s, deprecated: deprecated, config_key: h["configKey"]&.to_s
+          separator: h["separator"]&.to_s, deprecated: deprecated, config_key: h["configKey"]&.to_s,
+          required_if: required_if, roles: roles
         )
         problems << "#{label}: separator must not be empty" if var.separator.empty?
         unless var.default.nil?
@@ -537,8 +623,123 @@ module Docuconf
           secret: h["secret"] == true || %w[tls keystore].include?(type),
           path: h["path"].to_s, path_env: h["pathEnv"]&.to_s, reload: (h["reload"] || "restart").to_s,
           max_size: h["maxSize"], group: h["group"]&.to_s,
-          deprecated: contract_deprecated(label, h, problems, kind: :file), options: options
+          deprecated: contract_deprecated(label, h, problems, kind: :file), options: options,
+          required_if: read_required_if(label, h, problems), roles: read_roles(h["roles"], "#{label}: ", problems)
         )
+      end
+
+      # `requiredIf: {VAR: value}` (SPEC §4.2.1): one variable and a string,
+      # integer or boolean value, on an input that is not required, has no
+      # default and is not deprecated. check_conditions checks it against
+      # the variables.
+      def read_required_if(label, h, problems)
+        node = h["requiredIf"]
+        return nil if node.nil?
+        unless node.is_a?(Hash) && node.size == 1
+          problems << "#{label}: requiredIf must name one variable and its value: {VAR: value}"
+          return nil
+        end
+        name, value = node.first
+        unless ENV_NAME_RE.match?(name.to_s) && [String, Integer, TrueClass, FalseClass].any? { |c| value.is_a?(c) }
+          problems << "#{label}: requiredIf must name one variable and a string, integer or boolean value"
+          return nil
+        end
+        if h["required"] == true || !h["default"].nil?
+          problems << "#{label}: an input with requiredIf cannot be required or have a default"
+        end
+        unless h["deprecated"].nil?
+          problems << "#{label}: a conditionally required input cannot be deprecated: the platform could not stop setting it"
+        end
+        RequiredIf.new(name.to_s, value)
+      end
+
+      # A list of roles (SPEC §4.9): DNS labels, at least one, none listed
+      # twice. nil when absent.
+      def read_roles(node, what, problems)
+        return nil if node.nil?
+        unless node.is_a?(Array) && !node.empty? && node.all?(String)
+          problems << "#{what}roles must be a list of at least one role name"
+          return nil
+        end
+        node.each_with_index do |r, i|
+          if !ROLE_RE.match?(r)
+            problems << "#{what}role #{r.inspect} must be a DNS label"
+          elsif node.index(r) < i
+            problems << "#{what}role #{r} is listed twice"
+          end
+        end
+        node.dup.freeze
+      end
+
+      # The well-known fragments the contract includes (SPEC §4.8), as
+      # name@major. Their variables are inline in vars.
+      def read_includes(node, problems)
+        return [].freeze if node.nil?
+        unless node.is_a?(Array) && node.all?(String)
+          problems << "includes must be a list of fragment names, such as otel@1"
+          return [].freeze
+        end
+        out = []
+        node.each do |name|
+          if !FRAGMENT_RE.match?(name)
+            problems << "includes: #{name.inspect} is not a fragment name, name@major"
+          elsif out.include?(name)
+            problems << "includes: #{name} is listed twice"
+          else
+            out << name
+          end
+        end
+        out.freeze
+      end
+
+      # The inputs' roles against the contract's (SPEC §4.9), and
+      # DOCUCONF_ROLE: a required enum whose values are the roles, used by
+      # every role.
+      def check_roles(problems)
+        vars.map { |v| [v.name, v] }.concat(files.map { |f| ["file #{f.name}", f] }).each do |label, input|
+          next unless input.roles
+
+          if roles.nil?
+            problems << "#{label}: has roles, but the contract declares none"
+            next
+          end
+          (input.roles - roles).each do |r|
+            problems << "#{label}: role #{r} is not one of the contract's roles, #{roles.join(", ")}"
+          end
+        end
+        return unless roles
+
+        v = var(ROLE_VAR)
+        return if v && v.type == "enum" && v.required && v.roles.nil? && v.constraints[:values] == roles
+
+        problems << "#{ROLE_VAR}: a contract with roles declares it as a required enum whose values are the roles, " \
+          "#{roles.join(", ")}, used by every role"
+      end
+
+      # Each requiredIf against the variables (SPEC §4.2.1): it names
+      # another declared variable, a plain string, int, bool or enum one,
+      # and a value that variable can hold.
+      def check_conditions(problems)
+        vars.map { |v| [v.name, v] }.concat(files.map { |f| ["file #{f.name}", f] }).each do |label, input|
+          cond = input.required_if
+          next unless cond
+
+          on = var(cond.var)
+          if on.nil? || cond.var == input.name
+            problems << "#{label}: requiredIf must name another declared variable, not #{cond.var}"
+            next
+          end
+          if on.secret || !CONDITION_TYPES.include?(on.type)
+            problems << "#{label}: requiredIf names #{cond.var}, which is not a plain string, int, bool or enum variable"
+            next
+          end
+          kind = {"int" => [Integer], "bool" => [TrueClass, FalseClass]}.fetch(on.type, [String])
+          failures = kind.include?(cond.value.class) ? Values.check(on, cond.value) : []
+          next if kind.include?(cond.value.class) && failures.empty?
+
+          detail = failures.empty? ? "" : ": #{failures.first.message}"
+          problems << "#{label}: requiredIf: #{cond} is not a value #{cond.var} can have#{detail}"
+        end
       end
 
       def build_overlay(name, h, problems)

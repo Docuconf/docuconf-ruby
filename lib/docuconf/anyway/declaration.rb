@@ -29,7 +29,9 @@ module Docuconf
     # metadata.
     class VarDecl
       attr_reader :attr, :name, :type, :description, :details, :secret, :required, :default, :constraints,
-        :group, :examples, :config_key, :deprecated, :items, :regexp, :coercion, :lenient_duration
+        :group, :examples, :config_key, :deprecated, :items, :regexp, :coercion, :lenient_duration,
+        # Contract-first mode only (SPEC §4.2.1, §4.9): a Contract::RequiredIf and the roles that use it.
+        :required_if, :roles
 
       def initialize(**kw)
         kw.each { |k, v| instance_variable_set(:"@#{k}", v) }
@@ -111,10 +113,22 @@ module Docuconf
     # One file input (SPEC §4.6).
     class FileDecl
       attr_reader :accessor, :name, :type, :description, :details, :required, :secret, :path, :path_env, :reload,
-        :max_size, :group, :deprecated, :options
+        :max_size, :group, :deprecated, :options,
+        # Contract-first mode only (SPEC §4.2.1, §4.9): a Contract::RequiredIf and the roles that use it.
+        :required_if, :roles
 
       def initialize(**kw)
         kw.each { |k, v| instance_variable_set(:"@#{k}", v) }
+      end
+
+      # A copy of this input, required or not: how a role or a requiredIf
+      # condition changes it for one load.
+      def with_required(required)
+        return self if required == self.required
+
+        copy = dup
+        copy.instance_variable_set(:@required, required)
+        copy
       end
 
       def [](key) = options[key]
